@@ -23,6 +23,7 @@ class Part:
     paths: list
     bounds: tuple
     quantity: int
+    thickness: str = ''
     nested: int = 0
     processed: int = 0
     assumed_mm: bool = False
@@ -116,14 +117,14 @@ def export_pdf(parts, destination, name='', date='', day='', header=None):
         canvas.setTitle('Part Info')
         page_w, page_h = A4
         margin, row_h, header_h = 24, 88, 32
-        widths = [28, 126, 108, 92, 53, 48, 52, 40]
+        widths = [26, 114, 96, 82, 48, 50, 46, 48, 37]
         widths = [w * (page_w - 2 * margin) / sum(widths) for w in widths]
         xs = [margin]
         for width in widths:
             xs.append(xs[-1] + width)
         per_page = 7
         pages = math.ceil(len(parts) / per_page)
-        headings = ['Order', 'Part Name', 'Thumbnail', 'Size (mm)', 'Parts Count', 'Lazer Check', 'Bending Check', 'Delivery']
+        headings = ['Order', 'Part Name', 'Shape', 'Size (mm)', 'Thickness', 'Parts Count', 'Lazer Check', 'Bending Check', 'Delivery']
         for page in range(pages):
             canvas.setFont('Helvetica-Bold', 18)
             canvas.drawString(margin, page_h - 36, 'Part Info')
@@ -172,22 +173,22 @@ def export_pdf(parts, destination, name='', date='', day='', header=None):
                 width, height = part.size
                 item_order = page * per_page + index + 1
                 values = [str(item_order), part.source.stem, '',
-                          f'{width:.2f} x {height:.2f}', str(part.quantity)]
+                          f'{width:.2f} x {height:.2f}', getattr(part, 'thickness', ''), str(part.quantity)]
                 for col, value in enumerate(values):
                     fitted_text(canvas, value, xs[col] + 3, cy - 3, widths[col] - 6)
                 canvas.acroForm.checkbox(
                     name=f'lazer_{item_order}', tooltip=f'{part.source.stem} - Lazer',
-                    x=xs[5] + (widths[5] - 12) / 2, y=cy - 6, size=12,
+                    x=xs[6] + (widths[6] - 12) / 2, y=cy - 6, size=12,
                     checked=part.lazer_checked, buttonStyle='check', borderWidth=1,
                     forceBorder=True)
                 canvas.acroForm.checkbox(
                     name=f'bending_{item_order}', tooltip=f'{part.source.stem} - Bending',
-                    x=xs[6] + (widths[6] - 12) / 2, y=cy - 6, size=12,
+                    x=xs[7] + (widths[7] - 12) / 2, y=cy - 6, size=12,
                     checked=part.bending_checked, buttonStyle='check', borderWidth=1,
                     forceBorder=True)
                 canvas.acroForm.checkbox(
                     name=f'delivery_{item_order}', tooltip=f'{part.source.stem} - Delivery',
-                    x=xs[7] + (widths[7] - 12) / 2, y=cy - 6, size=12,
+                    x=xs[8] + (widths[8] - 12) / 2, y=cy - 6, size=12,
                     checked=part.delivery_checked, buttonStyle='check', borderWidth=1,
                     forceBorder=True)
                 drawing_scale = min((widths[2] - 16) / max(width, 1e-9), (row_h - 16) / max(height, 1e-9))
@@ -259,12 +260,22 @@ def desktop():
     day_entry.insert(0, datetime.date.today().strftime('%A'))
     day_entry.pack(side='left', padx=(0, 10))
 
-    ttk.Label(root, text='Double-click a row to edit quantity. Click Lazer, Bending, or Delivery to toggle checks.', padding=(10, 4)).pack(anchor='w')
-    columns = ('name', 'size', 'quantity', 'lazer', 'bending', 'delivery')
+    ttk.Label(root, text='Double-click a row to edit quantity/thickness. Click Lazer, Bending, or Delivery to toggle checks.', padding=(10, 4)).pack(anchor='w')
+    columns = ('name', 'size', 'thickness', 'quantity', 'lazer', 'bending', 'delivery')
     tree = ttk.Treeview(root, columns=columns, show='headings', selectmode='extended')
-    for col, heading in zip(columns, ['Part Name', 'Size (mm)', 'Parts Count', 'Lazer Check', 'Bending Check', 'Delivery']):
-        tree.heading(col, text=heading)
-        tree.column(col, width=260 if col == 'name' else (130 if col == 'size' else 100), minwidth=60, anchor='w' if col in ('name', 'size') else 'center')
+    headings_map = {
+        'name': 'Part Name',
+        'size': 'Size (mm)',
+        'thickness': 'Thickness',
+        'quantity': 'Parts Count',
+        'lazer': 'Lazer Check',
+        'bending': 'Bending Check',
+        'delivery': 'Delivery'
+    }
+    for col in columns:
+        tree.heading(col, text=headings_map[col])
+        tree.column(col, width=240 if col == 'name' else (120 if col == 'size' else (75 if col in ('thickness', 'quantity') else 95)),
+                    minwidth=50, anchor='w' if col in ('name', 'size') else 'center')
     tree.pack(fill='both', expand=True, padx=10, pady=5)
     status = tk.StringVar(value='Ready')
     ttk.Label(root, textvariable=status, padding=10).pack(anchor='w')
@@ -276,6 +287,7 @@ def desktop():
             tree.insert('', 'end', iid=str(i), values=(
                 part.source.name,
                 f'{w:.2f} x {h:.2f}',
+                part.thickness,
                 part.quantity,
                 '\u2611' if part.lazer_checked else '\u2610',
                 '\u2611' if part.bending_checked else '\u2610',
@@ -306,14 +318,14 @@ def desktop():
         refresh()
 
     def edit(event):
-        if tree.identify_column(event.x) in ('#4', '#5', '#6'):
+        if tree.identify_column(event.x) in ('#5', '#6', '#7'):
             return 'break'
         row = tree.identify_row(event.y)
         if not row:
             return
         part = parts[int(row)]
         dialog = tk.Toplevel(root)
-        dialog.title('Edit quantity')
+        dialog.title('Edit part')
         dialog.transient(root)
         dialog.grab_set()
         ttk.Label(dialog, text='Parts Count:', padding=8).grid(row=0, column=0)
@@ -321,18 +333,24 @@ def desktop():
         field.insert(0, str(part.quantity))
         field.grid(row=0, column=1, padx=8)
 
+        ttk.Label(dialog, text='Thickness:', padding=8).grid(row=1, column=0)
+        field_th = ttk.Entry(dialog)
+        field_th.insert(0, str(part.thickness))
+        field_th.grid(row=1, column=1, padx=8)
+
         def save():
             try:
                 q = int(field.get())
                 candidate = Part(part.source, part.paths, part.bounds, q)
                 validate_counts(candidate)
                 part.quantity = q
+                part.thickness = field_th.get().strip()
             except ValueError as exc:
                 messagebox.showerror('Invalid quantity', str(exc), parent=dialog)
                 return
             dialog.destroy()
             refresh()
-        ttk.Button(dialog, text='Save', command=save).grid(row=1, column=1, pady=10)
+        ttk.Button(dialog, text='Save', command=save).grid(row=2, column=1, pady=10)
 
     def toggle_checks(event):
         if event.keysym == 'space':
@@ -348,15 +366,15 @@ def desktop():
         if not row:
             return
         part = parts[int(row)]
-        if col == '#4':
+        if col == '#5':
             part.lazer_checked = not part.lazer_checked
             tree.set(row, 'lazer', '\u2611' if part.lazer_checked else '\u2610')
             return 'break'
-        elif col == '#5':
+        elif col == '#6':
             part.bending_checked = not part.bending_checked
             tree.set(row, 'bending', '\u2611' if part.bending_checked else '\u2610')
             return 'break'
-        elif col == '#6':
+        elif col == '#7':
             part.delivery_checked = not part.delivery_checked
             part.checked = part.delivery_checked
             tree.set(row, 'delivery', '\u2611' if part.delivery_checked else '\u2610')

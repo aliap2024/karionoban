@@ -108,17 +108,46 @@ class ReportTests(unittest.TestCase):
             # Verify new column headers
             self.assertIn(b'Order', decompressed)
             self.assertIn(b'Part Name', decompressed)
-            self.assertIn(b'Thumbnail', decompressed)
+            self.assertIn(b'Shape', decompressed)
             self.assertIn(b'Size \\(mm\\)', decompressed)
+            self.assertIn(b'Thickness', decompressed)
             self.assertIn(b'Parts Count', decompressed)
             self.assertIn(b'Lazer Check', decompressed)
             self.assertIn(b'Bending Check', decompressed)
             self.assertIn(b'Delivery', decompressed)
 
-            # Verify removed column headers are not present
+            # Verify renamed and removed column headers are not present
+            self.assertNotIn(b'Thumbnail', decompressed)
             self.assertNotIn(b'Nest Count', decompressed)
             self.assertNotIn(b'Remain Count', decompressed)
             self.assertNotIn(b'Processed', decompressed)
+
+    def test_thickness_and_unchecked_rendering(self):
+        import base64
+        import re
+        import zlib
+        from app import Part
+        with tempfile.TemporaryDirectory() as folder:
+            # 1. Test empty thickness and unchecked checkboxes (default shop traveler state)
+            part_empty = Part(Path('part-blank.dxf'), [], (0, 0, 40, 20), 3)
+            out_pdf1 = Path(folder) / 'blank_test.pdf'
+            export_pdf([part_empty], out_pdf1)
+            self.assertFalse(part_empty.lazer_checked)
+            self.assertFalse(part_empty.bending_checked)
+            self.assertFalse(part_empty.delivery_checked)
+            self.assertEqual(part_empty.thickness, '')
+
+            # 2. Test populated thickness
+            part_thick = Part(Path('part-thick.dxf'), [], (0, 0, 40, 20), 5, thickness='2.5mm')
+            out_pdf2 = Path(folder) / 'thick_test.pdf'
+            export_pdf([part_thick], out_pdf2)
+            pdf_bytes = out_pdf2.read_bytes()
+            stream_match = re.search(rb'/Contents (\d+ 0 R)', pdf_bytes)
+            self.assertIsNotNone(stream_match)
+            stream_obj = stream_match.group(1).split()[0]
+            obj_match = re.search(rb'%s 0 obj\s*<<.*?>>\s*stream\s*(.*?)\s*endstream' % stream_obj, pdf_bytes, re.DOTALL)
+            decompressed = zlib.decompress(base64.a85decode(obj_match.group(1), adobe=True))
+            self.assertIn(b'2.5mm', decompressed)
 
     def test_branding_shortcut_and_icons(self):
         import base64
