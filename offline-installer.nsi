@@ -24,8 +24,6 @@ Section "Install"
         Abort
     ${EndIf}
     SetShellVarContext current
+    CreateShortCut "$DESKTOP\لیزر مرکزی.lnk" "$LOCALAPPDATA\Programs\LaserMarkazi\Runtime\Scripts\pythonw.exe" '$\"$LOCALAPPDATA\Programs\LaserMarkazi\app.py$\"' "$LOCALAPPDATA\Programs\LaserMarkazi\app.ico" 0
     ClearErrors
-    CreateShortCut "$DESKTOP\لیزر مرکزی.lnk" "$LOCALAPPDATA\Programs\لیزر مرکزی\Runtime\Scripts\pythonw.exe" '$\"$LOCALAPPDATA\Programs\لیزر مرکزی\app.py$\"' "$LOCALAPPDATA\Programs\لیزر مرکزی\app.ico" 0
-    IfErrors 0 +2
-        MessageBox MB_OK|MB_ICONEXCLAMATION "میان‌بر دسکتاپ ساخته نشد. برنامه را از منوی Start باز کنید."
 SectionEnd

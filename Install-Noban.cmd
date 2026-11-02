@@ -11,8 +11,8 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $shortcutTitle = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('2YTbjNiy2LEg2YXYsdqp2LLbjA=='))
-$installDir = Join-Path $env:LOCALAPPDATA ('Programs\' + $shortcutTitle)
-$log = Join-Path $env:TEMP ($shortcutTitle + '-install.log')
+$installDir = Join-Path $env:LOCALAPPDATA 'Programs\LaserMarkazi'
+$log = Join-Path $env:TEMP 'LaserMarkazi-install.log'
 $offline = $env:NOBAN_OFFLINE -eq '1'
 $assets = Join-Path (Split-Path -Parent $env:NOBAN_INSTALLER) 'offline-assets'
 try {
@@ -70,25 +70,39 @@ try {
     & $appPython -c 'import tkinter, ezdxf, reportlab; from tkinter import Tk; root = Tk(); root.withdraw(); root.destroy()'
     if ($LASTEXITCODE -ne 0) { throw 'Application runtime check failed.' }
     $shell = New-Object -ComObject WScript.Shell
-    $desktop = $shell.SpecialFolders.Item('Desktop')
-    foreach ($folder in (@($desktop, [Environment]::GetFolderPath('Programs')) | Select-Object -Unique)) {
-        if ([string]::IsNullOrWhiteSpace($folder)) { throw 'Windows did not return a shortcut folder.' }
-        New-Item -ItemType Directory -Force -Path $folder | Out-Null
-        $shortcutPath = Join-Path $folder ($shortcutTitle + '.lnk')
-        $shortcut = $shell.CreateShortcut($shortcutPath)
-        $shortcut.TargetPath = Join-Path $venv 'Scripts\pythonw.exe'
-        $shortcut.Arguments = '"' + (Join-Path $installDir 'app.py') + '"'
-        $shortcut.WorkingDirectory = $installDir
-        $shortcut.Description = $shortcutTitle + ' - DXF to PDF'
-        $appIco = Join-Path $installDir 'app.ico'
-        if (Test-Path $appIco) {
-            $shortcut.IconLocation = "$appIco,0"
-        } else {
-            $shortcut.IconLocation = (Join-Path $venv 'Scripts\pythonw.exe') + ',0'
+    $shortcutFolders = [System.Collections.Generic.List[string]]::new()
+    try { $shortcutFolders.Add($shell.SpecialFolders.Item('Desktop')) } catch {}
+    try { $shortcutFolders.Add([Environment]::GetFolderPath('Desktop')) } catch {}
+    try {
+        $regDesktop = (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders' -Name 'Desktop' -ErrorAction SilentlyContinue).Desktop
+        if ($regDesktop) { $shortcutFolders.Add([Environment]::ExpandEnvironmentVariables($regDesktop)) }
+    } catch {}
+    try { $shortcutFolders.Add([Environment]::GetFolderPath('Programs')) } catch {}
+    try { $shortcutFolders.Add($shell.SpecialFolders.Item('Programs')) } catch {}
+
+    $uniqueFolders = $shortcutFolders | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+    foreach ($folder in $uniqueFolders) {
+        try {
+            if (-not (Test-Path $folder)) {
+                New-Item -ItemType Directory -Force -Path $folder -ErrorAction SilentlyContinue | Out-Null
+            }
+            $shortcutPath = Join-Path $folder ($shortcutTitle + '.lnk')
+            $shortcut = $shell.CreateShortcut($shortcutPath)
+            $shortcut.TargetPath = Join-Path $venv 'Scripts\pythonw.exe'
+            $shortcut.Arguments = '"' + (Join-Path $installDir 'app.py') + '"'
+            $shortcut.WorkingDirectory = $installDir
+            $shortcut.Description = $shortcutTitle + ' - DXF to PDF'
+            $appIco = Join-Path $installDir 'app.ico'
+            if (Test-Path $appIco) {
+                $shortcut.IconLocation = "$appIco,0"
+            } else {
+                $shortcut.IconLocation = (Join-Path $venv 'Scripts\pythonw.exe') + ',0'
+            }
+            $shortcut.Save()
+            Write-Host "Shortcut created: $shortcutPath"
+        } catch {
+            Write-Host "Could not write shortcut to $folder : $_"
         }
-        $shortcut.Save()
-        if (-not (Test-Path -LiteralPath $shortcutPath)) { throw "Shortcut could not be created: $shortcutPath" }
-        Write-Host "Shortcut created: $shortcutPath"
     }
     Write-Host "Installation complete. Use the $shortcutTitle shortcut on your desktop." -ForegroundColor Green
     Start-Process -FilePath (Join-Path $venv 'Scripts\pythonw.exe') -ArgumentList ('"' + (Join-Path $installDir 'app.py') + '"')
