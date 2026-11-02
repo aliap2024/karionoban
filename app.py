@@ -171,7 +171,23 @@ def desktop():
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
     root = tk.Tk()
-    root.title('Noban - DXF to PDF')
+    root.title('لیزر مرکزی - DXF to PDF')
+    app_dir = Path(__file__).resolve().parent
+    for icon_candidate in (app_dir / 'assets' / 'app.png', app_dir / 'app.png'):
+        if icon_candidate.exists():
+            try:
+                icon_img = tk.PhotoImage(file=str(icon_candidate))
+                root.iconphoto(True, icon_img)
+                break
+            except Exception:
+                pass
+    for ico_candidate in (app_dir / 'assets' / 'app.ico', app_dir / 'app.ico'):
+        if ico_candidate.exists():
+            try:
+                root.iconbitmap(default=str(ico_candidate))
+                break
+            except Exception:
+                pass
     root.geometry('1050x560')
     parts = []
     toolbar = ttk.Frame(root, padding=10)

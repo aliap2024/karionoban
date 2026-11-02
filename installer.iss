@@ -14,10 +14,11 @@ UninstallDisplayIcon={app}\Noban.exe
 
 [Files]
 Source: "dist\Noban.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "assets\app.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Noban"; Filename: "{app}\Noban.exe"
-Name: "{autodesktop}\Noban"; Filename: "{app}\Noban.exe"
+Name: "{group}\لیزر مرکزی"; Filename: "{app}\Noban.exe"; IconFilename: "{app}\app.ico"
+Name: "{autodesktop}\لیزر مرکزی"; Filename: "{app}\Noban.exe"; IconFilename: "{app}\app.ico"
 
 [Run]
-Filename: "{app}\Noban.exe"; Description: "Launch Noban"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Noban.exe"; Description: "Launch لیزر مرکزی"; Flags: nowait postinstall skipifsilent
