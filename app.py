@@ -1,5 +1,6 @@
 """Batch DXF part reports. Run without arguments for the desktop application."""
 import argparse
+import datetime
 import math
 import os
 from pathlib import Path
@@ -26,6 +27,15 @@ class Part:
     processed: int = 0
     assumed_mm: bool = False
     checked: bool = False
+    lazer_checked: bool = False
+    bending_checked: bool = False
+    delivery_checked: bool = False
+
+    def __post_init__(self):
+        if self.checked and not self.delivery_checked:
+            self.delivery_checked = True
+        elif self.delivery_checked and not self.checked:
+            self.checked = True
 
     @property
     def size(self):
@@ -73,11 +83,10 @@ def load_part(filename):
 
 
 def validate_counts(part):
-    values = (part.quantity, part.nested, part.processed)
-    if any(type(value) is not int for value in values):
+    if type(part.quantity) is not int:
         raise ValueError('Counts must be whole numbers')
-    if part.quantity < 1 or not 0 <= part.nested <= part.quantity or not 0 <= part.processed <= part.quantity:
-        raise ValueError('Quantity must be positive; other counts must be between 0 and quantity')
+    if part.quantity < 1:
+        raise ValueError('Quantity must be positive')
 
 
 def fitted_text(canvas, text, x, y, width, size=8):
@@ -86,11 +95,15 @@ def fitted_text(canvas, text, x, y, width, size=8):
     canvas.drawCentredString(x + width / 2, y, text)
 
 
-def export_pdf(parts, destination):
+def export_pdf(parts, destination, name='', date='', day='', header=None):
     if not parts:
         raise ValueError('Add at least one DXF file')
     for part in parts:
         validate_counts(part)
+    if header:
+        name = header.get('name', name)
+        date = header.get('date', date)
+        day = header.get('day', day)
     destination = Path(destination)
     if destination.suffix.lower() != '.pdf':
         raise ValueError('Output must have a .pdf extension')
@@ -103,18 +116,44 @@ def export_pdf(parts, destination):
         canvas.setTitle('Part Info')
         page_w, page_h = A4
         margin, row_h, header_h = 24, 88, 32
-        widths = [28, 124, 104, 91, 50, 50, 50, 50, 32]
+        widths = [28, 126, 108, 92, 53, 48, 52, 40]
         widths = [w * (page_w - 2 * margin) / sum(widths) for w in widths]
         xs = [margin]
         for width in widths:
             xs.append(xs[-1] + width)
         per_page = 7
         pages = math.ceil(len(parts) / per_page)
-        headings = ['Order', 'Part Name', 'Thumbnail', 'Size (mm)', 'Parts Count', 'Nest Count', 'Remain Count', 'Processed', 'Check']
+        headings = ['Order', 'Part Name', 'Thumbnail', 'Size (mm)', 'Parts Count', 'Lazer Check', 'Bending Check', 'Delivery']
         for page in range(pages):
-            canvas.setFont('Helvetica-Bold', 19)
-            canvas.drawString(margin, page_h - 40, 'Part Info')
-            top = page_h - 58
+            canvas.setFont('Helvetica-Bold', 18)
+            canvas.drawString(margin, page_h - 36, 'Part Info')
+
+            y_hdr = page_h - 56
+            canvas.setFont('Helvetica-Bold', 8.5)
+            canvas.drawString(margin, y_hdr, 'Name:')
+            canvas.setFont('Helvetica', 8.5)
+            if name:
+                canvas.drawString(margin + 34, y_hdr, str(name))
+            canvas.setLineWidth(.5)
+            canvas.setStrokeColorRGB(.65, .65, .65)
+            canvas.line(margin + 32, y_hdr - 2, margin + 220, y_hdr - 2)
+
+            canvas.setFont('Helvetica-Bold', 8.5)
+            canvas.drawString(margin + 240, y_hdr, 'Date:')
+            canvas.setFont('Helvetica', 8.5)
+            if date:
+                canvas.drawString(margin + 268, y_hdr, str(date))
+            canvas.line(margin + 266, y_hdr - 2, margin + 370, y_hdr - 2)
+
+            canvas.setFont('Helvetica-Bold', 8.5)
+            canvas.drawString(margin + 390, y_hdr, 'Day:')
+            canvas.setFont('Helvetica', 8.5)
+            if day:
+                canvas.drawString(margin + 416, y_hdr, str(day))
+            canvas.line(margin + 414, y_hdr - 2, page_w - margin, y_hdr - 2)
+            canvas.setStrokeColorRGB(0, 0, 0)
+
+            top = page_h - 68
             batch = parts[page * per_page:(page + 1) * per_page]
             bottom = top - header_h - row_h * len(batch)
             canvas.setFillColorRGB(.94, .95, .97)
@@ -131,15 +170,25 @@ def export_pdf(parts, destination):
                 ytop = top - header_h - index * row_h
                 cy = ytop - row_h / 2
                 width, height = part.size
-                values = [str(page * per_page + index + 1), part.source.stem, '',
-                          f'{width:.2f} x {height:.2f}', str(part.quantity), str(part.nested),
-                          str(part.quantity - part.nested), str(part.processed)]
+                item_order = page * per_page + index + 1
+                values = [str(item_order), part.source.stem, '',
+                          f'{width:.2f} x {height:.2f}', str(part.quantity)]
                 for col, value in enumerate(values):
                     fitted_text(canvas, value, xs[col] + 3, cy - 3, widths[col] - 6)
                 canvas.acroForm.checkbox(
-                    name=f'check_{page * per_page + index + 1}', tooltip=part.source.stem,
-                    x=xs[8] + (widths[8] - 12) / 2, y=cy - 6, size=12,
-                    checked=part.checked, buttonStyle='check', borderWidth=1,
+                    name=f'lazer_{item_order}', tooltip=f'{part.source.stem} - Lazer',
+                    x=xs[5] + (widths[5] - 12) / 2, y=cy - 6, size=12,
+                    checked=part.lazer_checked, buttonStyle='check', borderWidth=1,
+                    forceBorder=True)
+                canvas.acroForm.checkbox(
+                    name=f'bending_{item_order}', tooltip=f'{part.source.stem} - Bending',
+                    x=xs[6] + (widths[6] - 12) / 2, y=cy - 6, size=12,
+                    checked=part.bending_checked, buttonStyle='check', borderWidth=1,
+                    forceBorder=True)
+                canvas.acroForm.checkbox(
+                    name=f'delivery_{item_order}', tooltip=f'{part.source.stem} - Delivery',
+                    x=xs[7] + (widths[7] - 12) / 2, y=cy - 6, size=12,
+                    checked=part.delivery_checked, buttonStyle='check', borderWidth=1,
                     forceBorder=True)
                 drawing_scale = min((widths[2] - 16) / max(width, 1e-9), (row_h - 16) / max(height, 1e-9))
                 x0, y0, _, _ = part.bounds
@@ -158,7 +207,6 @@ def export_pdf(parts, destination):
             canvas.drawRightString(page_w - margin, 22, f'Page {page + 1} / {pages}')
             if any(p.assumed_mm for p in batch):
                 canvas.drawString(margin, 35, 'Unitless DXF: dimensions assumed to be millimeters.')
-            canvas.drawString(margin, 22, 'Remain Count = Parts Count - Nest Count')
             canvas.showPage()
         canvas.save()
         os.replace(temporary, destination)
@@ -188,17 +236,35 @@ def desktop():
                 break
             except Exception:
                 pass
-    root.geometry('1050x560')
+    root.geometry('1050x580')
     parts = []
-    toolbar = ttk.Frame(root, padding=10)
+
+    toolbar = ttk.Frame(root, padding=(10, 8, 10, 4))
     toolbar.pack(fill='x')
-    ttk.Label(root, text='Double-click a row to edit counts. Click Check (or press Space) to tick a part.', padding=10).pack(anchor='w')
-    columns = ('name', 'size', 'quantity', 'nested', 'remaining', 'processed', 'checked')
+
+    header_frame = ttk.LabelFrame(root, text='سربرگ گزارش (Header Info)', padding=8)
+    header_frame.pack(fill='x', padx=10, pady=4)
+
+    ttk.Label(header_frame, text='Name:').pack(side='left', padx=(5, 2))
+    name_entry = ttk.Entry(header_frame, width=22)
+    name_entry.pack(side='left', padx=(0, 15))
+
+    ttk.Label(header_frame, text='Date:').pack(side='left', padx=(5, 2))
+    date_entry = ttk.Entry(header_frame, width=14)
+    date_entry.insert(0, datetime.date.today().strftime('%Y-%m-%d'))
+    date_entry.pack(side='left', padx=(0, 15))
+
+    ttk.Label(header_frame, text='Day:').pack(side='left', padx=(5, 2))
+    day_entry = ttk.Entry(header_frame, width=14)
+    day_entry.insert(0, datetime.date.today().strftime('%A'))
+    day_entry.pack(side='left', padx=(0, 10))
+
+    ttk.Label(root, text='Double-click a row to edit quantity. Click Lazer, Bending, or Delivery to toggle checks.', padding=(10, 4)).pack(anchor='w')
+    columns = ('name', 'size', 'quantity', 'lazer', 'bending', 'delivery')
     tree = ttk.Treeview(root, columns=columns, show='headings', selectmode='extended')
-    for col, heading in zip(columns, ['Part Name', 'Size (mm)', 'Parts Count', 'Nest Count', 'Remain Count', 'Processed', 'Check']):
+    for col, heading in zip(columns, ['Part Name', 'Size (mm)', 'Parts Count', 'Lazer Check', 'Bending Check', 'Delivery']):
         tree.heading(col, text=heading)
-        tree.column(col, width=250 if col == 'name' else 130, minwidth=70)
-    tree.column('checked', width=70, stretch=False, anchor='center')
+        tree.column(col, width=260 if col == 'name' else (130 if col == 'size' else 100), minwidth=60, anchor='w' if col in ('name', 'size') else 'center')
     tree.pack(fill='both', expand=True, padx=10, pady=5)
     status = tk.StringVar(value='Ready')
     ttk.Label(root, textvariable=status, padding=10).pack(anchor='w')
@@ -207,7 +273,14 @@ def desktop():
         tree.delete(*tree.get_children())
         for i, part in enumerate(parts):
             w, h = part.size
-            tree.insert('', 'end', iid=str(i), values=(part.source.name, f'{w:.2f} x {h:.2f}', part.quantity, part.nested, part.quantity - part.nested, part.processed, '\u2611' if part.checked else '\u2610'))
+            tree.insert('', 'end', iid=str(i), values=(
+                part.source.name,
+                f'{w:.2f} x {h:.2f}',
+                part.quantity,
+                '\u2611' if part.lazer_checked else '\u2610',
+                '\u2611' if part.bending_checked else '\u2610',
+                '\u2611' if part.delivery_checked else '\u2610'
+            ))
         status.set(f'{len(parts)} parts loaded')
 
     def add():
@@ -233,52 +306,61 @@ def desktop():
         refresh()
 
     def edit(event):
-        if tree.identify_column(event.x) == '#7':
+        if tree.identify_column(event.x) in ('#4', '#5', '#6'):
             return 'break'
         row = tree.identify_row(event.y)
         if not row:
             return
         part = parts[int(row)]
         dialog = tk.Toplevel(root)
-        dialog.title('Edit counts')
+        dialog.title('Edit quantity')
         dialog.transient(root)
         dialog.grab_set()
-        fields = []
-        for i, (label, value) in enumerate(zip(['Parts Count', 'Nest Count', 'Processed'], [part.quantity, part.nested, part.processed])):
-            ttk.Label(dialog, text=label, padding=8).grid(row=i, column=0)
-            field = ttk.Entry(dialog)
-            field.insert(0, str(value))
-            field.grid(row=i, column=1, padx=8)
-            fields.append(field)
+        ttk.Label(dialog, text='Parts Count:', padding=8).grid(row=0, column=0)
+        field = ttk.Entry(dialog)
+        field.insert(0, str(part.quantity))
+        field.grid(row=0, column=1, padx=8)
 
         def save():
             try:
-                q, n, p = (int(f.get()) for f in fields)
-                candidate = Part(part.source, part.paths, part.bounds, q, n, p)
+                q = int(field.get())
+                candidate = Part(part.source, part.paths, part.bounds, q)
                 validate_counts(candidate)
-                part.quantity, part.nested, part.processed = q, n, p
+                part.quantity = q
             except ValueError as exc:
-                messagebox.showerror('Invalid counts', str(exc), parent=dialog)
+                messagebox.showerror('Invalid quantity', str(exc), parent=dialog)
                 return
             dialog.destroy()
             refresh()
-        ttk.Button(dialog, text='Save', command=save).grid(row=3, column=1, pady=10)
+        ttk.Button(dialog, text='Save', command=save).grid(row=1, column=1, pady=10)
 
     def toggle_checks(event):
         if event.keysym == 'space':
             rows = tree.selection()
-        else:
-            row = tree.identify_row(event.y)
-            if not row or tree.identify_column(event.x) != '#7':
-                return
-            rows = (row,)
-            tree.selection_set(row)
-            tree.focus_set()
-        for row in rows:
-            part = parts[int(row)]
-            part.checked = not part.checked
-            tree.set(row, 'checked', '\u2611' if part.checked else '\u2610')
-        return 'break'
+            for row in rows:
+                part = parts[int(row)]
+                part.delivery_checked = not part.delivery_checked
+                part.checked = part.delivery_checked
+                tree.set(row, 'delivery', '\u2611' if part.delivery_checked else '\u2610')
+            return 'break'
+        row = tree.identify_row(event.y)
+        col = tree.identify_column(event.x)
+        if not row:
+            return
+        part = parts[int(row)]
+        if col == '#4':
+            part.lazer_checked = not part.lazer_checked
+            tree.set(row, 'lazer', '\u2611' if part.lazer_checked else '\u2610')
+            return 'break'
+        elif col == '#5':
+            part.bending_checked = not part.bending_checked
+            tree.set(row, 'bending', '\u2611' if part.bending_checked else '\u2610')
+            return 'break'
+        elif col == '#6':
+            part.delivery_checked = not part.delivery_checked
+            part.checked = part.delivery_checked
+            tree.set(row, 'delivery', '\u2611' if part.delivery_checked else '\u2610')
+            return 'break'
 
     def export():
         if not parts:
@@ -287,7 +369,12 @@ def desktop():
         filename = filedialog.asksaveasfilename(defaultextension='.pdf', initialfile='Part Info.pdf', filetypes=[('PDF report', '*.pdf')])
         if filename:
             try:
-                export_pdf(parts, filename)
+                export_pdf(
+                    parts, filename,
+                    name=name_entry.get().strip(),
+                    date=date_entry.get().strip(),
+                    day=day_entry.get().strip()
+                )
                 status.set('Saved: ' + filename)
                 messagebox.showinfo('PDF saved', filename)
             except Exception as exc:
@@ -306,8 +393,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('files', nargs='*')
     parser.add_argument('-o', '--output', default='Part Info.pdf')
+    parser.add_argument('--name', default='', help='Order / Customer name')
+    parser.add_argument('--date', default='', help='Date for report header')
+    parser.add_argument('--day', default='', help='Day for report header')
     args = parser.parse_args()
     if args.files:
-        export_pdf([load_part(path) for path in args.files], args.output)
+        export_pdf(
+            [load_part(path) for path in args.files], args.output,
+            name=args.name, date=args.date, day=args.day
+        )
     else:
         desktop()

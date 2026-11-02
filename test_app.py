@@ -27,7 +27,7 @@ class ReportTests(unittest.TestCase):
             export_pdf([part] * 10, output)
             self.assertTrue(output.read_bytes().startswith(b'%PDF'))
             self.assertIn(b'/Count 2', output.read_bytes())
-            part.nested = 5
+            part.quantity = 0
             with self.assertRaises(ValueError):
                 export_pdf([part], output)
             self.assertTrue(output.read_bytes().startswith(b'%PDF'))
@@ -53,7 +53,14 @@ class ReportTests(unittest.TestCase):
         from app import Part
         from reportlab.pdfbase.acroform import AcroForm
         with tempfile.TemporaryDirectory() as folder:
-            parts = [Part(Path(f'part-{i}.dxf'), [], (0, 0, 10, 20), 1, checked=(i % 2 == 0)) for i in range(10)]
+            parts = [
+                Part(
+                    Path(f'part-{i}.dxf'), [], (0, 0, 10, 20), 1,
+                    lazer_checked=(i % 3 == 0),
+                    bending_checked=(i % 3 == 1),
+                    delivery_checked=(i % 3 == 2)
+                ) for i in range(10)
+            ]
             original = AcroForm.checkbox
             calls = []
             def record(form, *args, **kwargs):
@@ -61,7 +68,57 @@ class ReportTests(unittest.TestCase):
                 return original(form, *args, **kwargs)
             with patch.object(AcroForm, 'checkbox', record):
                 export_pdf(parts, Path(folder) / 'checked.pdf')
-            self.assertEqual(calls, [(f'check_{i + 1}', i % 2 == 0) for i in range(10)])
+            expected = []
+            for i in range(10):
+                expected.extend([
+                    (f'lazer_{i + 1}', i % 3 == 0),
+                    (f'bending_{i + 1}', i % 3 == 1),
+                    (f'delivery_{i + 1}', i % 3 == 2)
+                ])
+            self.assertEqual(calls, expected)
+
+    def test_header_and_columns_structure(self):
+        import base64
+        import re
+        import zlib
+        from app import Part
+        with tempfile.TemporaryDirectory() as folder:
+            part = Part(Path('test-part.dxf'), [], (0, 0, 50, 50), 2)
+            out_pdf = Path(folder) / 'header_test.pdf'
+            export_pdf([part], out_pdf, name='Ali Custom', date='2026-11-02', day='Monday')
+            pdf_bytes = out_pdf.read_bytes()
+            self.assertTrue(pdf_bytes.startswith(b'%PDF'))
+
+            # Extract and decompress page stream
+            stream_match = re.search(rb'/Contents (\d+ 0 R)', pdf_bytes)
+            self.assertIsNotNone(stream_match)
+            stream_obj = stream_match.group(1).split()[0]
+            obj_match = re.search(rb'%s 0 obj\s*<<.*?>>\s*stream\s*(.*?)\s*endstream' % stream_obj, pdf_bytes, re.DOTALL)
+            self.assertIsNotNone(obj_match)
+            decompressed = zlib.decompress(base64.a85decode(obj_match.group(1), adobe=True))
+
+            # Verify header fields
+            self.assertIn(b'Name:', decompressed)
+            self.assertIn(b'Ali Custom', decompressed)
+            self.assertIn(b'Date:', decompressed)
+            self.assertIn(b'2026-11-02', decompressed)
+            self.assertIn(b'Day:', decompressed)
+            self.assertIn(b'Monday', decompressed)
+
+            # Verify new column headers
+            self.assertIn(b'Order', decompressed)
+            self.assertIn(b'Part Name', decompressed)
+            self.assertIn(b'Thumbnail', decompressed)
+            self.assertIn(b'Size \\(mm\\)', decompressed)
+            self.assertIn(b'Parts Count', decompressed)
+            self.assertIn(b'Lazer Check', decompressed)
+            self.assertIn(b'Bending Check', decompressed)
+            self.assertIn(b'Delivery', decompressed)
+
+            # Verify removed column headers are not present
+            self.assertNotIn(b'Nest Count', decompressed)
+            self.assertNotIn(b'Remain Count', decompressed)
+            self.assertNotIn(b'Processed', decompressed)
 
     def test_branding_shortcut_and_icons(self):
         import base64
