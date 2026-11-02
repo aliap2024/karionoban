@@ -3,8 +3,9 @@ $env:NOBAN_INSTALLER = $PSCommandPath
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$installDir = Join-Path $env:LOCALAPPDATA 'Programs\Noban'
-$log = Join-Path $env:TEMP 'Noban-install.log'
+$shortcutTitle = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('2YTbjNiy2LEg2YXYsdqp2LLbjA=='))
+$installDir = Join-Path $env:LOCALAPPDATA ('Programs\' + $shortcutTitle)
+$log = Join-Path $env:TEMP ($shortcutTitle + '-install.log')
 $offline = $env:NOBAN_OFFLINE -eq '1'
 $assets = Join-Path (Split-Path -Parent $env:NOBAN_INSTALLER) 'offline-assets'
 try {
@@ -41,7 +42,7 @@ try {
         if (-not $offline) { Remove-Item -LiteralPath $download }
         if (-not (Test-Path $python)) { throw 'Python runtime was not installed in the expected directory.' }
     }
-    Write-Host 'Preparing Noban and installing dependencies...'
+    Write-Host "Preparing $shortcutTitle and installing dependencies..."
     $venv = Join-Path $installDir 'Runtime'
     & $python -m venv $venv
     if ($LASTEXITCODE -ne 0) { throw 'Could not create application runtime.' }
@@ -63,7 +64,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Application runtime check failed.' }
     $shell = New-Object -ComObject WScript.Shell
     $desktop = $shell.SpecialFolders.Item('Desktop')
-    $shortcutTitle = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('2YTbjNiy2LEg2YXYsdqp2LLbjA=='))
     foreach ($folder in (@($desktop, [Environment]::GetFolderPath('Programs')) | Select-Object -Unique)) {
         if ([string]::IsNullOrWhiteSpace($folder)) { throw 'Windows did not return a shortcut folder.' }
         New-Item -ItemType Directory -Force -Path $folder | Out-Null

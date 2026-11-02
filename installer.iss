@@ -1,12 +1,12 @@
 [Setup]
-AppId=NobanDXFReport
-AppName=Noban DXF Report
+AppId=LaserMarkazi
+AppName=لیزر مرکزی
 AppVersion=1.0.0
-DefaultDirName={localappdata}\Programs\Noban
-DefaultGroupName=Noban
+DefaultDirName={localappdata}\Programs\لیزر مرکزی
+DefaultGroupName=لیزر مرکزی
 PrivilegesRequired=lowest
 OutputDir=dist
-OutputBaseFilename=Noban-Setup
+OutputBaseFilename=لیزر مرکزی-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

@@ -181,6 +181,11 @@ class ReportTests(unittest.TestCase):
         self.assertIn('__APP_ICO_BASE64__', make_code)
         self.assertIn('__APP_PNG_BASE64__', make_code)
 
+        # 5. Verify offline installer NSIS configuration
+        nsi_code = (root / 'offline-installer.nsi').read_text(encoding='utf-8')
+        self.assertIn('Name "لیزر مرکزی"', nsi_code)
+        self.assertIn('OutFile "لیزر مرکزی.exe"', nsi_code)
+
 
 if __name__ == '__main__':
     unittest.main()
