@@ -173,19 +173,10 @@ def export_pdf(parts, destination, name='', date='', day='', header=None):
                 width, height = part.size
                 item_order = page * per_page + index + 1
                 values = [str(item_order), part.source.stem, '',
-                          f'{width:.2f} x {height:.2f}', getattr(part, 'thickness', ''), str(part.quantity)]
+                          f'{width:.2f} x {height:.2f}', getattr(part, 'thickness', ''), str(part.quantity),
+                          '', '']
                 for col, value in enumerate(values):
                     fitted_text(canvas, value, xs[col] + 3, cy - 3, widths[col] - 6)
-                canvas.acroForm.checkbox(
-                    name=f'lazer_{item_order}', tooltip=f'{part.source.stem} - Lazer',
-                    x=xs[6] + (widths[6] - 12) / 2, y=cy - 6, size=12,
-                    checked=part.lazer_checked, buttonStyle='check', borderWidth=1,
-                    forceBorder=True)
-                canvas.acroForm.checkbox(
-                    name=f'bending_{item_order}', tooltip=f'{part.source.stem} - Bending',
-                    x=xs[7] + (widths[7] - 12) / 2, y=cy - 6, size=12,
-                    checked=part.bending_checked, buttonStyle='check', borderWidth=1,
-                    forceBorder=True)
                 canvas.acroForm.checkbox(
                     name=f'delivery_{item_order}', tooltip=f'{part.source.stem} - Delivery',
                     x=xs[8] + (widths[8] - 12) / 2, y=cy - 6, size=12,
@@ -260,21 +251,19 @@ def desktop():
     day_entry.insert(0, datetime.date.today().strftime('%A'))
     day_entry.pack(side='left', padx=(0, 10))
 
-    ttk.Label(root, text='Double-click a row to edit quantity/thickness. Click Lazer, Bending, or Delivery to toggle checks.', padding=(10, 4)).pack(anchor='w')
-    columns = ('name', 'size', 'thickness', 'quantity', 'lazer', 'bending', 'delivery')
+    ttk.Label(root, text='Double-click a row to edit quantity/thickness. Click Delivery or press Space to toggle check.', padding=(10, 4)).pack(anchor='w')
+    columns = ('name', 'size', 'thickness', 'quantity', 'delivery')
     tree = ttk.Treeview(root, columns=columns, show='headings', selectmode='extended')
     headings_map = {
         'name': 'Part Name',
         'size': 'Size (mm)',
         'thickness': 'Thickness',
         'quantity': 'Parts Count',
-        'lazer': 'Lazer Check',
-        'bending': 'Bending Check',
         'delivery': 'Delivery'
     }
     for col in columns:
         tree.heading(col, text=headings_map[col])
-        tree.column(col, width=240 if col == 'name' else (120 if col == 'size' else (75 if col in ('thickness', 'quantity') else 95)),
+        tree.column(col, width=260 if col == 'name' else (130 if col == 'size' else (90 if col in ('thickness', 'quantity') else 100)),
                     minwidth=50, anchor='w' if col in ('name', 'size') else 'center')
     tree.pack(fill='both', expand=True, padx=10, pady=5)
     status = tk.StringVar(value='Ready')
@@ -289,8 +278,6 @@ def desktop():
                 f'{w:.2f} x {h:.2f}',
                 part.thickness,
                 part.quantity,
-                '\u2611' if part.lazer_checked else '\u2610',
-                '\u2611' if part.bending_checked else '\u2610',
                 '\u2611' if part.delivery_checked else '\u2610'
             ))
         status.set(f'{len(parts)} parts loaded')
@@ -318,7 +305,7 @@ def desktop():
         refresh()
 
     def edit(event):
-        if tree.identify_column(event.x) in ('#5', '#6', '#7'):
+        if tree.identify_column(event.x) == '#5':
             return 'break'
         row = tree.identify_row(event.y)
         if not row:
@@ -367,14 +354,6 @@ def desktop():
             return
         part = parts[int(row)]
         if col == '#5':
-            part.lazer_checked = not part.lazer_checked
-            tree.set(row, 'lazer', '\u2611' if part.lazer_checked else '\u2610')
-            return 'break'
-        elif col == '#6':
-            part.bending_checked = not part.bending_checked
-            tree.set(row, 'bending', '\u2611' if part.bending_checked else '\u2610')
-            return 'break'
-        elif col == '#7':
             part.delivery_checked = not part.delivery_checked
             part.checked = part.delivery_checked
             tree.set(row, 'delivery', '\u2611' if part.delivery_checked else '\u2610')

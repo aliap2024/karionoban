@@ -68,13 +68,7 @@ class ReportTests(unittest.TestCase):
                 return original(form, *args, **kwargs)
             with patch.object(AcroForm, 'checkbox', record):
                 export_pdf(parts, Path(folder) / 'checked.pdf')
-            expected = []
-            for i in range(10):
-                expected.extend([
-                    (f'lazer_{i + 1}', i % 3 == 0),
-                    (f'bending_{i + 1}', i % 3 == 1),
-                    (f'delivery_{i + 1}', i % 3 == 2)
-                ])
+            expected = [(f'delivery_{i + 1}', i % 3 == 2) for i in range(10)]
             self.assertEqual(calls, expected)
 
     def test_header_and_columns_structure(self):
@@ -127,14 +121,20 @@ class ReportTests(unittest.TestCase):
         import re
         import zlib
         from app import Part
+        from reportlab.pdfbase.acroform import AcroForm
         with tempfile.TemporaryDirectory() as folder:
-            # 1. Test empty thickness and unchecked checkboxes (default shop traveler state)
+            # 1. Test empty thickness and ensure NO checkboxes are created for lazer or bending
             part_empty = Part(Path('part-blank.dxf'), [], (0, 0, 40, 20), 3)
             out_pdf1 = Path(folder) / 'blank_test.pdf'
-            export_pdf([part_empty], out_pdf1)
-            self.assertFalse(part_empty.lazer_checked)
-            self.assertFalse(part_empty.bending_checked)
-            self.assertFalse(part_empty.delivery_checked)
+            calls = []
+            original = AcroForm.checkbox
+            def record(form, *args, **kwargs):
+                calls.append(kwargs['name'])
+                return original(form, *args, **kwargs)
+            with patch.object(AcroForm, 'checkbox', record):
+                export_pdf([part_empty], out_pdf1)
+            # Only delivery checkbox exists, none for lazer or bending
+            self.assertEqual(calls, ['delivery_1'])
             self.assertEqual(part_empty.thickness, '')
 
             # 2. Test populated thickness
