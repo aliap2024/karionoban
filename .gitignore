@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.exe
+*.zip
+.venv/
+dist/
+build/
+offline-assets/python-*.exe
+offline-assets/wheels/
