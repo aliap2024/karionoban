@@ -7,11 +7,18 @@ import sys
 def build(offline=False):
     root = Path(__file__).resolve().parent
     script = (root / 'windows-install.ps1').read_text()
-    for placeholder, name in [('__APP_BASE64__', 'app.py'), ('__REQUIREMENTS_BASE64__', 'requirements.txt')]:
-        encoded = base64.b64encode((root / name).read_bytes()).decode('ascii')
+    placeholders = [
+        ('__APP_BASE64__', root / 'app.py'),
+        ('__REQUIREMENTS_BASE64__', root / 'requirements.txt'),
+        ('__APP_ICO_BASE64__', root / 'assets' / 'app.ico'),
+        ('__APP_PNG_BASE64__', root / 'assets' / 'app.png'),
+    ]
+    for placeholder, path in placeholders:
+        encoded = base64.b64encode(path.read_bytes()).decode('ascii')
         script = script.replace(placeholder, encoded)
-        assert base64.b64decode(encoded) == (root / name).read_bytes()
-    assert '__APP_BASE64__' not in script and '__REQUIREMENTS_BASE64__' not in script
+        assert base64.b64decode(encoded) == path.read_bytes()
+    for placeholder, _ in placeholders:
+        assert placeholder not in script
     header = '''@echo off
 setlocal
 set "NOBAN_INSTALLER=%~f0"

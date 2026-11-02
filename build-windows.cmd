@@ -5,7 +5,7 @@ py -3 -m venv .venv
 if errorlevel 1 goto fail
 .venv\Scripts\python -m pip install -r requirements.txt pyinstaller
 if errorlevel 1 goto fail
-.venv\Scripts\python -m PyInstaller --noconfirm --clean --windowed --onefile --name Noban app.py
+.venv\Scripts\python -m PyInstaller --noconfirm --clean --windowed --onefile --icon assets\app.ico --add-data "assets;assets" --name Noban app.py
 if errorlevel 1 goto fail
 set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
 if not exist "%ISCC%" set "ISCC=%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"

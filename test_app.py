@@ -63,6 +63,38 @@ class ReportTests(unittest.TestCase):
                 export_pdf(parts, Path(folder) / 'checked.pdf')
             self.assertEqual(calls, [(f'check_{i + 1}', i % 2 == 0) for i in range(10)])
 
+    def test_branding_shortcut_and_icons(self):
+        import base64
+        root = Path(__file__).resolve().parent
+
+        # 1. Verify asset files exist and have content
+        ico_file = root / 'assets' / 'app.ico'
+        png_file = root / 'assets' / 'app.png'
+        self.assertTrue(ico_file.exists(), 'assets/app.ico does not exist')
+        self.assertTrue(png_file.exists(), 'assets/app.png does not exist')
+        self.assertGreater(ico_file.stat().st_size, 1000)
+        self.assertGreater(png_file.stat().st_size, 1000)
+
+        # 2. Verify window title in app.py
+        app_code = (root / 'app.py').read_text(encoding='utf-8')
+        self.assertIn("root.title('لیزر مرکزی - DXF to PDF')", app_code)
+        self.assertIn("root.iconphoto", app_code)
+        self.assertIn("root.iconbitmap", app_code)
+
+        # 3. Verify Windows installer shortcut configuration
+        ps1_code = (root / 'windows-install.ps1').read_text(encoding='utf-8')
+        b64_title = '2YTbjNiy2LEg2YXYsdqp2LLbjA=='
+        self.assertIn(b64_title, ps1_code)
+        decoded = base64.b64decode(b64_title).decode('utf-8')
+        self.assertEqual(decoded, 'لیزر مرکزی')
+        self.assertIn("($shortcutTitle + '.lnk')", ps1_code)
+        self.assertIn("app.ico", ps1_code)
+
+        # 4. Verify make-installer.py placeholder coverage
+        make_code = (root / 'make-installer.py').read_text(encoding='utf-8')
+        self.assertIn('__APP_ICO_BASE64__', make_code)
+        self.assertIn('__APP_PNG_BASE64__', make_code)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -8,6 +8,7 @@ ShowInstDetails show
 AutoCloseWindow true
 Page instfiles
 
+Icon "assets\app.ico"
 Section "Install"
     InitPluginsDir
     SetOutPath "$PLUGINSDIR"
@@ -24,7 +25,7 @@ Section "Install"
     ${EndIf}
     SetShellVarContext current
     ClearErrors
-    CreateShortCut "$DESKTOP\Noban.lnk" "$LOCALAPPDATA\Programs\Noban\Runtime\Scripts\pythonw.exe" '$\"$LOCALAPPDATA\Programs\Noban\app.py$\"'
+    CreateShortCut "$DESKTOP\لیزر مرکزی.lnk" "$LOCALAPPDATA\Programs\Noban\Runtime\Scripts\pythonw.exe" '$\"$LOCALAPPDATA\Programs\Noban\app.py$\"' "$LOCALAPPDATA\Programs\Noban\app.ico" 0
     IfErrors 0 +2
         MessageBox MB_OK|MB_ICONEXCLAMATION "Desktop shortcut could not be created. Open Noban from the Start menu."
 SectionEnd
