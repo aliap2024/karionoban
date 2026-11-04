@@ -422,6 +422,41 @@ END-ISO-10303-21;
                 self.assertIn('2mm', txt)
                 self.assertIn('-', txt)
 
+    def test_step_dual_view_bend_profile_and_isometric(self):
+        sample_01 = Path('/home/aliap/Downloads/noban/1405.08.12/01-gal-2mm-q2.STEP')
+        sample_02 = Path('/home/aliap/Downloads/noban/1405.08.12/02-gal-2mm-q4.STEP')
+        if sample_01.exists() and sample_02.exists():
+            with tempfile.TemporaryDirectory() as folder:
+                folder = Path(folder)
+                parts_01 = load_parts(sample_01)
+                self.assertEqual(len(parts_01), 1)
+                p1 = parts_01[0]
+                self.assertTrue(p1.is_3d)
+                self.assertIsNotNone(p1.profile_paths)
+                self.assertIsNotNone(p1.profile_bounds)
+                self.assertIsNotNone(p1.faces_3d)
+                # Profile span for U-bracket (approx 194 x 110)
+                span_x1 = p1.profile_bounds[2] - p1.profile_bounds[0]
+                span_y1 = p1.profile_bounds[3] - p1.profile_bounds[1]
+                self.assertAlmostEqual(span_x1, 194.0, delta=1.0)
+                self.assertAlmostEqual(span_y1, 110.0, delta=1.0)
+
+                parts_02 = load_parts(sample_02)
+                p2 = parts_02[0]
+                self.assertTrue(p2.is_3d)
+                self.assertIsNotNone(p2.profile_paths)
+                self.assertIsNotNone(p2.profile_bounds)
+                span_x2 = p2.profile_bounds[2] - p2.profile_bounds[0]
+                span_y2 = p2.profile_bounds[3] - p2.profile_bounds[1]
+                self.assertAlmostEqual(span_x2, 15.0, delta=1.0)
+                self.assertAlmostEqual(span_y2, 25.6, delta=1.0)
+
+                # Export multi-part dual-view PDF
+                pdf_out = folder / 'dual_view_report.pdf'
+                export_pdf([p1, p2], pdf_out)
+                self.assertTrue(pdf_out.exists())
+                self.assertGreater(pdf_out.stat().st_size, 5000)
+
     def test_dense_sheet_nesting_multi_level_and_bend_lines(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / 'nested-4mm-q3.dxf'

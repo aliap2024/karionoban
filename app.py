@@ -61,6 +61,9 @@ class Part:
     label: str = ''
     is_3d: bool = False
     faces_3d: list = None
+    profile_paths: list = None
+    profile_bounds: tuple = None
+    size_3d: tuple = None
 
     def __post_init__(self):
         if self.checked and not self.delivery_checked:
@@ -425,6 +428,7 @@ def _load_step(filename):
                 parsed_faces.append({'pts': pts_arr, 'normal': norm, 'center': pts_arr.mean(axis=0)})
 
     curves = []
+    straight_edges = []
     for eid, (ename, ebody) in entities.items():
         if ename == 'EDGE_CURVE':
             args = parse_args(ebody)
@@ -437,11 +441,19 @@ def _load_step(filename):
             if geom_ref not in entities:
                 if p1 is not None and p2 is not None:
                     curves.append([p1, p2])
+                    vec = p2 - p1
+                    L = float(np.linalg.norm(vec))
+                    if L > 1e-3:
+                        straight_edges.append((vec / L, L))
                 continue
             gname, gbody = entities[geom_ref]
             if gname == 'LINE':
                 if p1 is not None and p2 is not None:
                     curves.append([p1, p2])
+                    vec = p2 - p1
+                    L = float(np.linalg.norm(vec))
+                    if L > 1e-3:
+                        straight_edges.append((vec / L, L))
             elif gname == 'CIRCLE':
                 c_args = parse_args(gbody)
                 if len(c_args) >= 3:
@@ -461,6 +473,23 @@ def _load_step(filename):
             elif p1 is not None and p2 is not None:
                 curves.append([p1, p2])
 
+    bend_cyl_axes = []
+    for eid, (name, body) in entities.items():
+        if name == 'CYLINDRICAL_SURFACE':
+            args = parse_args(body)
+            if len(args) >= 3:
+                axis_ref = get_ref(args[1])
+                try:
+                    radius = float(args[2])
+                except Exception:
+                    radius = 0.0
+                if 0.5 <= radius <= 25.0 and axis_ref in entities:
+                    a_args = parse_args(entities[axis_ref][1])
+                    if len(a_args) >= 3:
+                        d_vec = get_direction(get_ref(a_args[2]))
+                        if d_vec is not None:
+                            bend_cyl_axes.append(d_vec)
+
     if not curves and not parsed_faces:
         raise ValueError('No supported 3D geometry found in STEP file')
 
@@ -469,6 +498,59 @@ def _load_step(filename):
     c_max = all_pts.max(axis=0)
     center = (c_min + c_max) / 2.0
     extents = c_max - c_min
+    size_3d = (float(extents[0]), float(extents[1]), float(extents[2]))
+
+    # Determine primary bend axis for 2D profile view
+    candidates = [np.array([1., 0., 0.]), np.array([0., 1., 0.]), np.array([0., 0., 1.])]
+    candidates.extend(bend_cyl_axes)
+    best_dir = np.array([0., 0., 1.])
+    best_score = -1.0
+    for c_dir in candidates:
+        norm = np.linalg.norm(c_dir)
+        if norm < 1e-6:
+            continue
+        u_dir = c_dir / norm
+        score = sum(L for d, L in straight_edges if abs(float(np.dot(d, u_dir))) > 0.98)
+        cyl_count = sum(1 for c_ax in bend_cyl_axes if abs(float(np.dot(c_ax, u_dir))) > 0.98)
+        score += cyl_count * 500.0
+        if score > best_score:
+            best_score = score
+            best_dir = u_dir
+
+    v_bend = best_dir / np.linalg.norm(best_dir)
+    for i in range(3):
+        if abs(v_bend[i]) > 1e-4:
+            if v_bend[i] < 0:
+                v_bend = -v_bend
+            break
+
+    # Universal orthonormal basis for 2D bending profile view
+    up_ref = np.array([0., 1., 0.])
+    v_vec = up_ref - np.dot(up_ref, v_bend) * v_bend
+    if np.linalg.norm(v_vec) < 0.2:
+        up_ref = np.array([0., 0., 1.])
+        v_vec = up_ref - np.dot(up_ref, v_bend) * v_bend
+    v_vec /= np.linalg.norm(v_vec)
+    u_vec = np.cross(v_vec, v_bend)
+    u_vec /= np.linalg.norm(u_vec)
+
+    profile_curves = []
+    for c in curves:
+        pts = np.asarray(c)
+        u_coords = pts @ u_vec
+        v_coords = pts @ v_vec
+        pts2d = np.column_stack([u_coords, v_coords])
+        span = pts2d.max(axis=0) - pts2d.min(axis=0)
+        if np.linalg.norm(span) > 0.2:
+            profile_curves.append([(float(p[0]), float(p[1])) for p in pts2d])
+
+    if profile_curves:
+        all_prof = np.concatenate(profile_curves, axis=0)
+        p_min = all_prof.min(axis=0)
+        p_max = all_prof.max(axis=0)
+        profile_bounds = (float(p_min[0]), float(p_min[1]), float(p_max[0]), float(p_max[1]))
+    else:
+        profile_bounds = (0.0, 0.0, 1.0, 1.0)
 
     if parsed_faces:
         for f in parsed_faces:
@@ -551,7 +633,10 @@ def _load_step(filename):
     thickness = f'{match_th.group(1)}mm' if match_th else ''
 
     return [Part(source=source, paths=proj_curves, bounds=bounds, quantity=quantity,
-                 thickness=thickness, is_3d=True, faces_3d=faces_3d if faces_3d else None)]
+                 thickness=thickness, is_3d=True, faces_3d=faces_3d if faces_3d else None,
+                 profile_paths=profile_curves if profile_curves else None,
+                 profile_bounds=profile_bounds if profile_curves else None,
+                 size_3d=size_3d)]
 
 
 def load_parts(filename, input_mm=False):
@@ -696,7 +781,7 @@ def export_pdf(parts, destination, name='', date='', day='', header=None):
         canvas.setTitle('Part Info')
         page_w, page_h = A4
         margin, row_h, header_h = 24, 88, 32
-        widths = [26, 114, 96, 82, 48, 50, 46, 48, 37]
+        widths = [24, 104, 118, 72, 48, 46, 46, 48, 37]
         widths = [w * (page_w - 2 * margin) / sum(widths) for w in widths]
         xs = [margin]
         for width in widths:
@@ -768,34 +853,99 @@ def export_pdf(parts, destination, name='', date='', day='', header=None):
                     x=xs[8] + (widths[8] - 12) / 2, y=cy - 6, size=12,
                     checked=part.delivery_checked, buttonStyle='check', borderWidth=1,
                     forceBorder=True)
-                drawing_scale = min((widths[2] - 16) / max(geom_w, 1e-9), (row_h - 16) / max(geom_h, 1e-9))
-                dx = xs[2] + (widths[2] - geom_w * drawing_scale) / 2
-                dy = cy - geom_h * drawing_scale / 2
+                profile_paths = getattr(part, 'profile_paths', None)
                 faces = getattr(part, 'faces_3d', None)
-                if faces:
-                    for f in faces:
-                        poly = [(dx + (p[0] - x0) * drawing_scale, dy + (p[1] - y0) * drawing_scale) for p in f['points']]
-                        if len(poly) >= 3:
-                            canvas.setFillColorRGB(*f['rgb'])
-                            canvas.setStrokeColorRGB(0.18, 0.18, 0.22)
-                            canvas.setLineWidth(0.35)
-                            p_obj = canvas.beginPath()
-                            p_obj.moveTo(poly[0][0], poly[0][1])
-                            for pt in poly[1:]:
-                                p_obj.lineTo(pt[0], pt[1])
-                            p_obj.close()
-                            canvas.drawPath(p_obj, fill=1, stroke=1)
-                else:
-                    canvas.setLineWidth(.45)
+
+                if is_3d and profile_paths:
+                    shape_x = xs[2]
+                    shape_w = widths[2]
+                    sub_w = (shape_w - 8) / 2
+                    avail_h = row_h - 16
+
+                    # 1. Profile View (Left) - Cross-section bend profile ("اون مشکی ها")
+                    px0, py0, px1, py1 = getattr(part, 'profile_bounds', (0, 0, 1, 1))
+                    pw, ph = max(px1 - px0, 1e-6), max(py1 - py0, 1e-6)
+                    scale_p = min((sub_w - 6) / pw, avail_h / ph)
+                    p_dx = shape_x + 3 + (sub_w - pw * scale_p) / 2
+                    p_dy = cy - ph * scale_p / 2
+
+                    canvas.setLineWidth(1.0)
                     canvas.setStrokeColorRGB(0, 0, 0)
-                    for outline in part.paths:
-                        if len(outline) < 2:
+                    for curve in profile_paths:
+                        if len(curve) < 2:
                             continue
-                        drawing = canvas.beginPath()
-                        drawing.moveTo(dx + (outline[0][0] - x0) * drawing_scale, dy + (outline[0][1] - y0) * drawing_scale)
-                        for x, y in outline[1:]:
-                            drawing.lineTo(dx + (x - x0) * drawing_scale, dy + (y - y0) * drawing_scale)
-                        canvas.drawPath(drawing)
+                        d = canvas.beginPath()
+                        d.moveTo(p_dx + (curve[0][0] - px0) * scale_p, p_dy + (curve[0][1] - py0) * scale_p)
+                        for pt in curve[1:]:
+                            d.lineTo(p_dx + (pt[0] - px0) * scale_p, p_dy + (pt[1] - py0) * scale_p)
+                        canvas.drawPath(d, stroke=1, fill=0)
+
+                    # Subtle vertical separator between 2D profile and 3D isometric view
+                    div_x = shape_x + sub_w + 4
+                    canvas.setLineWidth(0.3)
+                    canvas.setStrokeColorRGB(0.85, 0.85, 0.85)
+                    canvas.line(div_x, ytop - 6, div_x, ytop - row_h + 6)
+
+                    # 2. Isometric View (Right) - 3D shaded perspective ("کنار شکل")
+                    ix0, iy0, ix1, iy1 = part.bounds
+                    iw, ih = max(ix1 - ix0, 1e-6), max(iy1 - iy0, 1e-6)
+                    scale_i = min((sub_w - 6) / iw, avail_h / ih)
+                    i_dx = div_x + 4 + (sub_w - iw * scale_i) / 2
+                    i_dy = cy - ih * scale_i / 2
+
+                    if faces:
+                        for f in faces:
+                            poly = [(i_dx + (p[0] - ix0) * scale_i, i_dy + (p[1] - iy0) * scale_i) for p in f['points']]
+                            if len(poly) >= 3:
+                                canvas.setFillColorRGB(*f['rgb'])
+                                canvas.setStrokeColorRGB(0.18, 0.18, 0.22)
+                                canvas.setLineWidth(0.35)
+                                p_obj = canvas.beginPath()
+                                p_obj.moveTo(poly[0][0], poly[0][1])
+                                for pt in poly[1:]:
+                                    p_obj.lineTo(pt[0], pt[1])
+                                p_obj.close()
+                                canvas.drawPath(p_obj, fill=1, stroke=1)
+                    else:
+                        canvas.setLineWidth(0.4)
+                        canvas.setStrokeColorRGB(0, 0, 0)
+                        for outline in part.paths:
+                            if len(outline) < 2:
+                                continue
+                            drawing = canvas.beginPath()
+                            drawing.moveTo(i_dx + (outline[0][0] - ix0) * scale_i, i_dy + (outline[0][1] - iy0) * scale_i)
+                            for x, y in outline[1:]:
+                                drawing.lineTo(i_dx + (x - ix0) * scale_i, i_dy + (y - iy0) * scale_i)
+                            canvas.drawPath(drawing)
+                else:
+                    drawing_scale = min((widths[2] - 16) / max(geom_w, 1e-9), (row_h - 16) / max(geom_h, 1e-9))
+                    dx = xs[2] + (widths[2] - geom_w * drawing_scale) / 2
+                    dy = cy - geom_h * drawing_scale / 2
+                    faces = getattr(part, 'faces_3d', None)
+                    if faces:
+                        for f in faces:
+                            poly = [(dx + (p[0] - x0) * drawing_scale, dy + (p[1] - y0) * drawing_scale) for p in f['points']]
+                            if len(poly) >= 3:
+                                canvas.setFillColorRGB(*f['rgb'])
+                                canvas.setStrokeColorRGB(0.18, 0.18, 0.22)
+                                canvas.setLineWidth(0.35)
+                                p_obj = canvas.beginPath()
+                                p_obj.moveTo(poly[0][0], poly[0][1])
+                                for pt in poly[1:]:
+                                    p_obj.lineTo(pt[0], pt[1])
+                                p_obj.close()
+                                canvas.drawPath(p_obj, fill=1, stroke=1)
+                    else:
+                        canvas.setLineWidth(.45)
+                        canvas.setStrokeColorRGB(0, 0, 0)
+                        for outline in part.paths:
+                            if len(outline) < 2:
+                                continue
+                            drawing = canvas.beginPath()
+                            drawing.moveTo(dx + (outline[0][0] - x0) * drawing_scale, dy + (outline[0][1] - y0) * drawing_scale)
+                            for x, y in outline[1:]:
+                                drawing.lineTo(dx + (x - x0) * drawing_scale, dy + (y - y0) * drawing_scale)
+                            canvas.drawPath(drawing)
             canvas.setFont('Helvetica', 8)
             canvas.drawRightString(page_w - margin, 22, f'Page {page + 1} / {pages}')
             if any(p.assumed_mm for p in batch):
