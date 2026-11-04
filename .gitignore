@@ -1,4 +1,6 @@
 __pycache__/
+.pytest_cache/
+*.log
 *.py[cod]
 *$py.class
 *.exe
