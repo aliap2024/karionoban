@@ -482,6 +482,22 @@ END-ISO-10303-21;
                 self.assertTrue(all(p.thickness == '4mm' for p in iranpour_parts))
                 export_pdf(iranpour_parts, Path(folder) / 'iranpour.pdf')
 
+    def test_clear_all_button_and_windows_export_resilience(self):
+        root = Path(__file__).resolve().parent
+        app_code = (root / 'app.py').read_text(encoding='utf-8')
+        self.assertIn("ttk.Button(toolbar, text='Clear all', command=clear)", app_code)
+        self.assertIn("parts.clear()", app_code)
+        self.assertIn("tree.bind('<Delete>', lambda e: remove())", app_code)
+        self.assertIn("destination.parent.mkdir(parents=True, exist_ok=True)", app_code)
+
+        # Test saving to a non-existent sub-directory automatically creates it
+        with tempfile.TemporaryDirectory() as folder:
+            from app import Part
+            part = Part(Path('test.dxf'), [[(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)]], (0, 0, 10, 10), 1)
+            nested_dest = Path(folder) / 'sub1' / 'sub2' / 'nested_export.pdf'
+            export_pdf([part], nested_dest)
+            self.assertTrue(nested_dest.exists())
+
 
 if __name__ == '__main__':
     unittest.main()
