@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 
 import ezdxf
@@ -685,6 +686,7 @@ def export_pdf(parts, destination, name='', date='', day='', header=None):
     destination = Path(destination)
     if destination.suffix.lower() != '.pdf':
         raise ValueError('Output must have a .pdf extension')
+    destination.parent.mkdir(parents=True, exist_ok=True)
     if any(destination.resolve() == part.source.resolve() for part in parts):
         raise ValueError('Output cannot replace a source drawing')
     handle, temporary = tempfile.mkstemp(suffix='.pdf', dir=destination.parent)
@@ -800,7 +802,15 @@ def export_pdf(parts, destination, name='', date='', day='', header=None):
                 canvas.drawString(margin, 35, 'Unitless DXF: dimensions assumed to be millimeters.')
             canvas.showPage()
         canvas.save()
-        os.replace(temporary, destination)
+        # On Windows, antivirus or indexing services can briefly hold newly written files.
+        for attempt in range(5):
+            try:
+                os.replace(temporary, destination)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.1)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -913,6 +923,12 @@ def desktop():
             del parts[i]
         refresh()
 
+    def clear():
+        if not parts:
+            return
+        parts.clear()
+        refresh()
+
     def edit(event):
         if tree.identify_column(event.x) == '#5':
             return 'break'
@@ -983,16 +999,22 @@ def desktop():
                 )
                 status.set('Saved: ' + filename)
                 messagebox.showinfo('PDF saved', filename)
+            except PermissionError:
+                messagebox.showerror('Save failed',
+                    'The file is currently open in another program (e.g. Adobe Acrobat or browser).\n'
+                    'Please close the PDF file and try saving again.')
             except Exception as exc:
                 messagebox.showerror('Export failed', str(exc))
 
     ttk.Button(toolbar, text='Add CAD files', command=add).pack(side='left', padx=4)
     ttk.Checkbutton(toolbar, text='Input coordinates are mm', variable=input_mm).pack(side='left', padx=8)
     ttk.Button(toolbar, text='Remove selected', command=remove).pack(side='left', padx=4)
+    ttk.Button(toolbar, text='Clear all', command=clear).pack(side='left', padx=4)
     ttk.Button(toolbar, text='Save PDF', command=export).pack(side='right', padx=4)
     tree.bind('<Double-1>', edit)
     tree.bind('<Button-1>', toggle_checks)
     tree.bind('<space>', toggle_checks)
+    tree.bind('<Delete>', lambda e: remove())
     root.mainloop()
 
 
