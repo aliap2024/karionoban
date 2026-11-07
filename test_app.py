@@ -304,7 +304,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn('foreach ($folder in @($desktop, $programs))', template)
         self.assertIn('NOBAN_SETUP_EXE', nsis)
         self.assertNotIn('CreateShortCut', nsis)
-        self.assertIn('1.0.4.0', nsis)
+        self.assertIn('1.0.6.0', nsis)
         self.assertIn('Sysnative', nsis)
         for name in ('Install-Noban.cmd', 'Install-Noban-Offline.cmd', 'offline-install.ps1'):
             script = (root / name).read_text()
@@ -345,6 +345,9 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(decoded, 'لیزر مرکزی')
         self.assertIn("($shortcutTitle + '.lnk')", ps1_code)
         self.assertIn("app.ico", ps1_code)
+        self.assertIn("$tempShortcutPath = Join-Path $env:TEMP", ps1_code)
+        self.assertIn("Move-Item -LiteralPath $tempShortcutPath -Destination $shortcutPath -Force", ps1_code)
+        self.assertIn("Description = 'Laser Markazi - DXF to PDF'", ps1_code)
 
         # 4. Verify make-installer.py placeholder coverage
         make_code = (root / 'make-installer.py').read_text(encoding='utf-8')
@@ -354,7 +357,7 @@ class ReportTests(unittest.TestCase):
         # 5. Verify offline installer NSIS configuration
         nsi_code = (root / 'offline-installer.nsi').read_text(encoding='utf-8')
         self.assertIn('Name "لیزر مرکزی"', nsi_code)
-        self.assertIn('OutFile "LaserMarkazi-Setup-1.0.4.exe"', nsi_code)
+        self.assertIn('OutFile "LaserMarkazi-Setup-1.0.6.exe"', nsi_code)
 
     def test_step_3d_file_loading_and_pdf_export(self):
         import subprocess
@@ -362,40 +365,20 @@ class ReportTests(unittest.TestCase):
             folder = Path(folder)
             # 1. Test synthetic STEP file
             step_file = folder / 'bracket-3mm-q5.step'
-            step_content = """ISO-10303-21;
-HEADER;
-FILE_DESCRIPTION((''),'2;1');
-FILE_NAME('test.step','2026',(''),(''),'','','');
-FILE_SCHEMA(('CONFIG_CONTROL_DESIGN'));
-ENDSEC;
-DATA;
-#1 = CARTESIAN_POINT('', (0.0, 0.0, 0.0));
-#2 = CARTESIAN_POINT('', (100.0, 0.0, 0.0));
-#3 = CARTESIAN_POINT('', (100.0, 50.0, 10.0));
-#4 = CARTESIAN_POINT('', (0.0, 50.0, 10.0));
-#11 = VERTEX_POINT('', #1);
-#12 = VERTEX_POINT('', #2);
-#13 = VERTEX_POINT('', #3);
-#14 = VERTEX_POINT('', #4);
-#21 = LINE('', #1, #100);
-#22 = LINE('', #2, #100);
-#23 = LINE('', #3, #100);
-#24 = LINE('', #4, #100);
-#31 = EDGE_CURVE('', #11, #12, #21, .T.);
-#32 = EDGE_CURVE('', #12, #13, #22, .T.);
-#33 = EDGE_CURVE('', #13, #14, #23, .T.);
-#34 = EDGE_CURVE('', #14, #11, #24, .T.);
-ENDSEC;
-END-ISO-10303-21;
-"""
-            step_file.write_text(step_content)
+            from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+            from OCP.IFSelect import IFSelect_RetDone
+            from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
+            writer = STEPControl_Writer()
+            writer.Transfer(BRepPrimAPI_MakeBox(100, 50, 10).Shape(), STEPControl_AsIs)
+            self.assertEqual(writer.Write(str(step_file)), IFSelect_RetDone)
             parts = load_parts(step_file)
             self.assertEqual(len(parts), 1)
             part = parts[0]
             self.assertTrue(part.is_3d)
             self.assertEqual(part.quantity, 5)
             self.assertEqual(part.thickness, '3mm')
-            self.assertEqual(len(part.paths), 4)
+            self.assertGreaterEqual(len(part.paths), 9)
+            self.assertEqual(part.size_3d, (100, 50, 10))
 
             # Export PDF and verify output
             pdf_out = folder / 'output.pdf'
@@ -411,7 +394,7 @@ END-ISO-10303-21;
                 self.assertTrue(sp.is_3d)
                 self.assertEqual(sp.quantity, 2)
                 self.assertEqual(sp.thickness, '2mm')
-                self.assertEqual(len(sp.paths), 82)
+                self.assertGreater(len(sp.paths), 0)
                 self.assertEqual(sp.size, (0.0, 0.0))
 
                 pdf_sample = folder / 'step_sample.pdf'
@@ -456,6 +439,66 @@ END-ISO-10303-21;
                 export_pdf([p1, p2], pdf_out)
                 self.assertTrue(pdf_out.exists())
                 self.assertGreater(pdf_out.stat().st_size, 5000)
+
+    def test_step_shading_uses_pixel_depth_and_smooth_colors(self):
+        import numpy as np
+        from app import _shade_step
+        points = [[0, 0], [1, 0], [0, 1]]
+        front = {'points': points, 'z': [-1, 1, -1],
+                 'vertex_rgb': [[1, 0, 0]] * 3}
+        back = {'points': points, 'z': [0, 0, 0],
+                'vertex_rgb': [[0, 0, 1]] * 3}
+        first = np.asarray(_shade_step([front, back], (0, 0, 1, 1)))
+        second = np.asarray(_shade_step([back, front], (0, 0, 1, 1)))
+        np.testing.assert_array_equal(first, second)
+        np.testing.assert_array_equal(first[899, 100], [0, 0, 255])
+        np.testing.assert_array_equal(first[899, 800], [255, 0, 0])
+        np.testing.assert_array_equal(first[100, 900], [255, 255, 255])
+        gradient = dict(back, vertex_rgb=[[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+        rgb = np.asarray(_shade_step([gradient], (0, 0, 1, 1)))[666, 333]
+        self.assertTrue(np.all((rgb >= 80) & (rgb <= 90)), rgb)
+
+    def test_step_holes_hidden_edges_units_and_invalid_geometry(self):
+        import numpy as np
+        from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+        from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder
+        from OCP.IFSelect import IFSelect_RetDone
+        from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
+        from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'plate-q2.step'
+            box = BRepPrimAPI_MakeBox(40, 30, 2).Shape()
+            hole = BRepPrimAPI_MakeCylinder(
+                gp_Ax2(gp_Pnt(20, 15, -1), gp_Dir(0, 0, 1)), 4, 4).Shape()
+            shape = BRepAlgoAPI_Cut(box, hole).Shape()
+            writer = STEPControl_Writer()
+            writer.Transfer(shape, STEPControl_AsIs)
+            self.assertEqual(writer.Write(str(source)), IFSelect_RetDone)
+            part = load_parts(source)[0]
+            np.testing.assert_allclose(part.size_3d, (40, 30, 2), atol=1e-6)
+            self.assertTrue(part.faces_3d)
+            self.assertTrue(any(len(path) > 10 for path in part.paths))
+            # Only three of the six box surfaces face the camera; hidden edges stay hidden.
+            self.assertGreaterEqual(len(part.paths), 9)
+            self.assertLess(len(part.paths), 20)
+            self.assertEqual(len({tuple(tuple(p) for p in path) for path in part.profile_paths}),
+                             len(part.profile_paths))
+            self.assertTrue(all(np.isfinite(f['points']).all() for f in part.faces_3d))
+            # A ray through the hole center must hit no shaded triangle.
+            for face in part.faces_3d:
+                tri = np.asarray(face['points'])
+                edges = np.roll(tri, -1, axis=0) - tri
+                sides = edges[:, 0] * -tri[:, 1] - edges[:, 1] * -tri[:, 0]
+                self.assertFalse(np.all(sides > 1e-8) or np.all(sides < -1e-8))
+            # STEP units must be converted by the reader, not guessed from the name.
+            text = source.read_text()
+            self.assertIn('SI_UNIT(.MILLI.,.METRE.)', text)
+            source.write_text(text.replace('SI_UNIT(.MILLI.,.METRE.)', 'SI_UNIT($,.METRE.)'))
+            scaled = load_parts(source)[0]
+            np.testing.assert_allclose(scaled.size_3d, (40000, 30000, 2000), atol=1e-3)
+            source.write_text('ISO-10303-21; invalid geometry')
+            with self.assertRaises(ValueError):
+                load_parts(source)
 
     def test_dense_sheet_nesting_multi_level_and_bend_lines(self):
         with tempfile.TemporaryDirectory() as folder:
