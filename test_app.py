@@ -576,6 +576,62 @@ class ReportTests(unittest.TestCase):
             export_pdf([part], nested_dest)
             self.assertTrue(nested_dest.exists())
 
+    def test_remnant_sheet_nesting_and_meter_unit_scaling(self):
+        with tempfile.TemporaryDirectory() as folder:
+            # 1. Remnant L-shaped stock containing multiple parts with cutouts
+            source = Path(folder) / 'remnant-ahan 1.5.dxf'
+            drawing = ezdxf.new()
+            drawing.units = ezdxf.units.MM
+            space = drawing.modelspace()
+            # L-shaped remnant sheet: 1000x800 with cutout corner
+            space.add_lwpolyline([(0, 0), (1000, 0), (1000, 400), (500, 400), (500, 800), (0, 800)], close=True)
+            # Part 1: 300 x 200 mm with hole at (100, 100)
+            space.add_lwpolyline([(50, 50), (350, 50), (350, 250), (50, 250)], close=True)
+            space.add_circle((150, 150), 10)
+            # Part 2: 350 x 250 mm with hole at (150, 550)
+            space.add_lwpolyline([(50, 450), (400, 450), (400, 700), (50, 700)], close=True)
+            space.add_circle((150, 550), 15)
+            drawing.saveas(source)
+
+            parts = load_parts(source)
+            self.assertEqual(len(parts), 2)
+            self.assertEqual(parts[0].thickness, '1.5mm')
+            self.assertEqual(parts[1].thickness, '1.5mm')
+            sizes = sorted([p.size for p in parts], key=lambda s: s[0] * s[1])
+            self.assertAlmostEqual(sizes[0][0], 300.0)
+            self.assertAlmostEqual(sizes[0][1], 200.0)
+            self.assertAlmostEqual(sizes[1][0], 350.0)
+            self.assertAlmostEqual(sizes[1][1], 250.0)
+
+            # 2. Test auto-recovery from misconfigured $INSUNITS=6 (Meters) on mm coordinates
+            m_source = Path(folder) / 'plate-steel 2.5-q4.dxf'
+            m_drawing = ezdxf.new()
+            m_drawing.units = ezdxf.units.M  # Header says meters
+            m_space = m_drawing.modelspace()
+            m_space.add_lwpolyline([(0, 0), (400, 0), (400, 250), (0, 250)], close=True)
+            m_space.add_circle((100, 100), 10)
+            m_drawing.saveas(m_source)
+
+            m_parts = load_parts(m_source)
+            self.assertEqual(len(m_parts), 1)
+            self.assertEqual(m_parts[0].quantity, 4)
+            self.assertEqual(m_parts[0].thickness, '2.5mm')
+            self.assertAlmostEqual(m_parts[0].size[0], 400.0)
+            self.assertAlmostEqual(m_parts[0].size[1], 250.0)
+
+            # 3. Test real nested DXF yarmahmoodi if available in Downloads or workspace
+            for candidate in (Path('/home/aliap/Downloads/yarmahmoodi-ahan 1.5 full.dxf'),
+                              Path(__file__).resolve().parent / 'yarmahmoodi-ahan 1.5 full.dxf'):
+                if candidate.exists():
+                    y_parts = load_parts(candidate)
+                    self.assertEqual(len(y_parts), 25)
+                    self.assertEqual(sum(p.quantity for p in y_parts), 358)
+                    self.assertEqual(y_parts[0].thickness, '1.5mm')
+                    out_pdf = Path(folder) / 'yarmahmoodi.pdf'
+                    export_pdf(y_parts, out_pdf)
+                    self.assertTrue(out_pdf.exists())
+                    break
+
 
 if __name__ == '__main__':
     unittest.main()
