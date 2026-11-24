@@ -130,6 +130,10 @@ def _read_part(filename, input_mm=False):
         raise ValueError('No supported 2D geometry found')
     from ezdxf.path import bbox as path_bbox
     box = path_bbox(paths, fast=False)
+    raw_span = max(box.extmax.x - box.extmin.x, box.extmax.y - box.extmin.y)
+    if doc.units == units.M and not input_mm and raw_span > 25:
+        # Drawing coordinates are already in millimeters despite $INSUNITS=6 (Meters) in header
+        scale = 1
     bounds = (box.extmin.x * scale, box.extmin.y * scale,
               box.extmax.x * scale, box.extmax.y * scale)
     if not all(math.isfinite(v) for v in bounds):
@@ -142,8 +146,8 @@ def _read_part(filename, input_mm=False):
     quantity = int(match.group(1)) if match else 1
     if quantity < 1:
         raise ValueError('Quantity must be at least 1')
-    match_th = re.search(r'(?:^|[-_])(\d+(?:\.\d+)?)\s*mm(?=$|[^a-z0-9])', source.stem, re.I)
-    thickness = f'{match_th.group(1)}mm' if match_th else ''
+    match_th = re.search(r'(?:(?:^|[-_])(\d+(?:\.\d+)?)\s*mm(?=$|[^a-z0-9]))|(?:(?:ahan|iron|steel|alum|sheet)[-\s_]+(\d+(?:\.\d+)?))', source.stem, re.I)
+    thickness = f'{match_th.group(1) or match_th.group(2)}mm' if match_th else ''
     return Part(source, outlines, bounds, quantity, assumed_mm=not bool(doc.units) and not input_mm,
                 thickness=thickness)
 
@@ -481,8 +485,8 @@ def load_parts(filename, input_mm=False):
                 if any(_inside(pt, closed[j]) for pt in test_pts):
                     parents[i] = j
                     break
-    # shortcut: enclosing rectangle containing parts is treated as sheet stock; ambiguous
-    # plates with many cutouts should be supplied without the stock border.
+    # Enclosing boundary containing parts is treated as sheet stock; both standard
+    # rectangular sheets and irregular remnant/offcut sheets are recognized.
     sheets = set()
     for i, path in enumerate(closed):
         children = [j for j, parent in enumerate(parents) if parent == i]
@@ -493,8 +497,17 @@ def load_parts(filename, input_mm=False):
                        max(sum(math.dist(a, b) for a, b in zip(closed[j], closed[j][1:])) ** 2, 1e-30)
                        < .95 for j in children)
         has_nested = any(parents[k] in children for k in range(n))
-        if parents[i] is None and rectangular and (nonround >= 2 or has_nested):
+        if parents[i] is None and (rectangular and (nonround >= 2 or has_nested) or (has_nested and nonround >= 2)):
             sheets.add(i)
+    if sheets:
+        for i in range(n):
+            if parents[i] is None and i not in sheets:
+                children = [j for j, parent in enumerate(parents) if parent == i]
+                nonround = sum(4 * math.pi * areas[j] /
+                               max(sum(math.dist(a, b) for a, b in zip(closed[j], closed[j][1:])) ** 2, 1e-30)
+                               < .95 for j in children)
+                if nonround >= 2:
+                    sheets.add(i)
     depths = []
     for i, parent in enumerate(parents):
         depths.append(0 if parent is None or parent in sheets else depths[parent] + 1)

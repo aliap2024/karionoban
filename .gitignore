@@ -10,3 +10,4 @@ dist/
 build/
 offline-assets/python-*.exe
 offline-assets/wheels/
+outputs/
