@@ -65,6 +65,7 @@ class Part:
     profile_paths: list = None
     profile_bounds: tuple = None
     size_3d: tuple = None
+    layers: list = None
 
     def __post_init__(self):
         if self.checked and not self.delivery_checked:
@@ -98,6 +99,7 @@ def _read_part(filename, input_mm=False):
     doc = ezdxf.readfile(source)
     scale = units.conversion_factor(doc.units, units.MM) if doc.units and not input_mm else 1
     paths = []
+    path_layers = []
     skipped = set()
     # Text and dimensions annotate a part; they are not its cut geometry.
     annotations = {'TEXT', 'MTEXT', 'DIMENSION', 'LEADER', 'MLEADER', 'POINT', 'VIEWPORT'}
@@ -112,11 +114,15 @@ def _read_part(filename, input_mm=False):
         if linetype == 'BYLAYER':
             while styled_entity.dxf.layer == '0' and styled_entity.source_block_reference is not None:
                 styled_entity = styled_entity.source_block_reference
-            linetype = doc.layers.get(styled_entity.dxf.layer).dxf.linetype.upper()
+            if styled_entity.dxf.layer in doc.layers:
+                linetype = doc.layers.get(styled_entity.dxf.layer).dxf.get('linetype', 'CONTINUOUS').upper()
+            else:
+                linetype = 'CONTINUOUS'
         if linetype not in ('CONTINUOUS', 'BYBLOCK'):
-            pattern = doc.linetypes.get(linetype).pattern_tags.tags
-            if any(tag.code == 49 and tag.value <= 0 for tag in pattern):
-                continue
+            if linetype in doc.linetypes:
+                pattern = doc.linetypes.get(linetype).pattern_tags.tags
+                if any(tag.code == 49 and tag.value <= 0 for tag in pattern):
+                    continue
         try:
             path = make_path(entity)
         except (TypeError, ValueError, NotImplementedError):
@@ -124,6 +130,7 @@ def _read_part(filename, input_mm=False):
             continue
         if len(path):
             paths.append(path)
+            path_layers.append(styled_entity.dxf.layer)
     if skipped:
         raise ValueError('Unsupported geometry: ' + ', '.join(sorted(skipped)))
     if not paths:
@@ -149,7 +156,7 @@ def _read_part(filename, input_mm=False):
     match_th = re.search(r'(?:(?:^|[-_])(\d+(?:\.\d+)?)\s*mm(?=$|[^a-z0-9]))|(?:(?:ahan|iron|steel|alum|sheet)[-\s_]+(\d+(?:\.\d+)?))', source.stem, re.I)
     thickness = f'{match_th.group(1) or match_th.group(2)}mm' if match_th else ''
     return Part(source, outlines, bounds, quantity, assumed_mm=not bool(doc.units) and not input_mm,
-                thickness=thickness)
+                thickness=thickness, layers=path_layers)
 
 
 
@@ -167,6 +174,7 @@ def _area(path):
 
 def _inside(point, polygon):
     x, y = point
+    y = y + 1e-9
     inside = False
     for (ax, ay), (bx, by) in zip(polygon, polygon[1:]):
         if (ay > y) != (by > y) and x < (bx - ax) * (y - ay) / (by - ay) + ax:
@@ -444,25 +452,32 @@ def load_parts(filename, input_mm=False):
     if source.suffix.lower() in ('.step', '.stp'):
         return _load_step(source)
     drawing = _read_part(filename, input_mm=input_mm)
+    drawing_layers = getattr(drawing, 'layers', None) or ['0'] * len(drawing.paths)
     tolerance = .1  # millimeters, including files whose source units are inches
     closed, pending, open_paths = [], [], []
-    for path in drawing.paths:
+    closed_layers, pending_layers = [], []
+    for path, layer in zip(drawing.paths, drawing_layers):
         if math.dist(path[0], path[-1]) <= tolerance:
             closed.append(path[:-1] + [path[0]])
+            closed_layers.append(layer)
         else:
             pending.append(path)
+            pending_layers.append(layer)
     # LINE/ARC exports often store one outline as many separate entities.
     while pending:
         chain = pending.pop(0)
+        layer = pending_layers.pop(0)
         while math.dist(chain[0], chain[-1]) > tolerance:
             for i, path in enumerate(pending):
                 if math.dist(chain[-1], path[0]) <= tolerance:
                     chain.extend(path[1:])
                     pending.pop(i)
+                    pending_layers.pop(i)
                     break
                 if math.dist(chain[-1], path[-1]) <= tolerance:
                     chain.extend(path[-2::-1])
                     pending.pop(i)
+                    pending_layers.pop(i)
                     break
             else:
                 open_paths.append(chain)
@@ -470,7 +485,10 @@ def load_parts(filename, input_mm=False):
         else:
             chain[-1] = chain[0]
             closed.append(chain)
-    closed.sort(key=_area, reverse=True)
+            closed_layers.append(layer)
+    order = sorted(range(len(closed)), key=lambda idx: _area(closed[idx]), reverse=True)
+    closed = [closed[idx] for idx in order]
+    closed_layers = [closed_layers[idx] for idx in order]
     areas = list(map(_area, closed))
     boxes = [_bounds([path]) for path in closed]
     n = len(closed)
@@ -478,44 +496,70 @@ def load_parts(filename, input_mm=False):
     for i in range(n):
         bx0, by0, bx1, by1 = boxes[i]
         p0, p1 = closed[i][0], closed[i][1]
-        test_pts = [((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2), p0, closed[i][len(closed[i]) // 2]]
+        cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+        poly_cx = sum(p[0] for p in closed[i][:-1]) / max(len(closed[i]) - 1, 1)
+        poly_cy = sum(p[1] for p in closed[i][:-1]) / max(len(closed[i]) - 1, 1)
+        test_pts = [(cx, cy), (poly_cx, poly_cy), ((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2),
+                    p0, closed[i][len(closed[i]) // 2]]
         for j in range(i - 1, -1, -1):
-            if (boxes[j][0] <= bx0 and boxes[j][1] <= by0 and
-                boxes[j][2] >= bx1 and boxes[j][3] >= by1):
+            if (boxes[j][0] - 1e-3 <= bx0 and boxes[j][1] - 1e-3 <= by0 and
+                boxes[j][2] + 1e-3 >= bx1 and boxes[j][3] + 1e-3 >= by1):
                 if any(_inside(pt, closed[j]) for pt in test_pts):
                     parents[i] = j
                     break
     # Enclosing boundary containing parts is treated as sheet stock; both standard
     # rectangular sheets and irregular remnant/offcut sheets are recognized.
     sheets = set()
+    sheet_re = re.compile(r'(?i)(?:^|[-_])(?:sheet|stock|nest|table|chideman|varagh|ورق|شیت|چیدمان)(?:[-_0-9]|$)')
     for i, path in enumerate(closed):
-        children = [j for j, parent in enumerate(parents) if parent == i]
+        if parents[i] is not None:
+            continue
+        layer_name = closed_layers[i] if i < len(closed_layers) else ''
         x0, y0, x1, y1 = boxes[i]
-        area_box = (x1 - x0) * (y1 - y0)
-        rectangular = abs(areas[i] - area_box) <= max(tolerance ** 2, area_box * 1e-4)
-        nonround = sum(4 * math.pi * areas[j] /
-                       max(sum(math.dist(a, b) for a, b in zip(closed[j], closed[j][1:])) ** 2, 1e-30)
-                       < .95 for j in children)
-        has_nested = any(parents[k] in children for k in range(n))
-        if parents[i] is None and (rectangular and (nonround >= 2 or has_nested) or (has_nested and nonround >= 2)):
+        w, h = x1 - x0, y1 - y0
+        area_box = w * h
+        root_area = areas[i]
+        children = [j for j, parent in enumerate(parents) if parent == i]
+        if min(w, h) >= 150 and max(w, h) >= 250 and root_area >= 50_000 and sheet_re.search(layer_name):
             sheets.add(i)
-    if sheets:
-        for i in range(n):
-            if parents[i] is None and i not in sheets:
-                children = [j for j, parent in enumerate(parents) if parent == i]
-                nonround = sum(4 * math.pi * areas[j] /
-                               max(sum(math.dist(a, b) for a, b in zip(closed[j], closed[j][1:])) ** 2, 1e-30)
-                               < .95 for j in children)
-                if nonround >= 2:
-                    sheets.add(i)
+            continue
+        if root_area < 100_000 or min(w, h) < 200:
+            continue
+        has_nested_part = any(parents[k] in children and areas[parents[k]] >= 500 for k in range(n))
+        rectangular = abs(root_area - area_box) <= max(tolerance ** 2, area_box * 1e-4)
+        sum_child_area = sum(areas[j] for j in children)
+        if has_nested_part:
+            sheets.add(i)
+        elif len(children) >= 2 and sum_child_area >= 0.25 * root_area:
+            sheets.add(i)
     depths = []
     for i, parent in enumerate(parents):
         depths.append(0 if parent is None or parent in sheets else depths[parent] + 1)
+    is_part = [False] * n
+    for i in range(n):
+        if i in sheets or depths[i] % 2 != 0:
+            continue
+        if depths[i] == 0:
+            is_part[i] = True
+        else:
+            p = parents[i]
+            x0, y0, x1, y1 = boxes[i]
+            span = max(x1 - x0, y1 - y0)
+            px0, py0, px1, py1 = boxes[p]
+            p_span = max(px1 - px0, py1 - py0)
+            ci = ((x0 + x1) / 2, (y0 + y1) / 2)
+            cp = ((px0 + px1) / 2, (py0 + py1) / 2)
+            clearance = min(abs(x0 - px0), abs(x1 - px1), abs(y0 - py0), abs(y1 - py1))
+            concentric = math.dist(ci, cp) <= max(2.0, 0.05 * p_span)
+            is_countersink = concentric and (clearance <= 3.5 or areas[i] / max(areas[p], 1e-9) > 0.6)
+            if areas[i] < 50.0 or span < 8.0 or is_countersink:
+                is_part[i] = False
+            else:
+                is_part[i] = True
     # shortcut: enclosed open strokes are treated as bends, not open cuts/engraving.
     for path in open_paths:
         mid = ((path[0][0] + path[1][0]) / 2, (path[0][1] + path[1][1]) / 2)
-        owners = [i for i, outline in enumerate(closed) if i not in sheets
-                  and depths[i] % 2 == 0
+        owners = [i for i, outline in enumerate(closed) if is_part[i]
                   and boxes[i][0] <= mid[0] <= boxes[i][2]
                   and boxes[i][1] <= mid[1] <= boxes[i][3]
                   and _inside(mid, outline)]
@@ -523,9 +567,18 @@ def load_parts(filename, input_mm=False):
             raise ValueError('Open cut outline outside any part: close disconnected LINE/ARC endpoints')
     parts = []
     for i, path in enumerate(closed):
-        if i in sheets or depths[i] % 2:
+        if not is_part[i]:
             continue
-        paths = [path] + [closed[j] for j, p in enumerate(parents) if p == i]
+        descendants = []
+        for j in range(i + 1, n):
+            if is_part[j]:
+                continue
+            curr = parents[j]
+            while curr is not None and curr != i and not is_part[curr] and curr not in sheets:
+                curr = parents[curr]
+            if curr == i:
+                descendants.append(closed[j])
+        paths = [path] + descendants
         for part in parts:
             if _same_shape(paths, part.paths, tolerance):
                 part.quantity += drawing.quantity

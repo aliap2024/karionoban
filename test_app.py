@@ -632,6 +632,97 @@ class ReportTests(unittest.TestCase):
                     self.assertTrue(out_pdf.exists())
                     break
 
+    def test_plate_with_multiple_nonround_cutouts_not_detected_as_sheet(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'plate_with_slots-3mm.dxf'
+            drawing = ezdxf.new()
+            drawing.units = ezdxf.units.MM
+            space = drawing.modelspace()
+            # 200 x 100 mm plate
+            space.add_lwpolyline([(0, 0), (200, 0), (200, 100), (0, 100)], close=True)
+            # 4 non-round rectangular cutouts (e.g. slots/connectors)
+            for x, y in [(20, 20), (20, 60), (120, 20), (120, 60)]:
+                space.add_lwpolyline([(x, y), (x + 40, y), (x + 40, y + 20), (x, y + 20)], close=True)
+            drawing.saveas(source)
+
+            parts = load_parts(source)
+            self.assertEqual(len(parts), 1)
+            self.assertAlmostEqual(parts[0].size[0], 200.0)
+            self.assertAlmostEqual(parts[0].size[1], 100.0)
+            self.assertEqual(len(parts[0].paths), 5)  # 1 outer + 4 cutouts
+
+    def test_concentric_countersunk_hole_not_treated_as_part(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'countersink_plate.dxf'
+            drawing = ezdxf.new()
+            drawing.units = ezdxf.units.MM
+            space = drawing.modelspace()
+            # 150 x 150 mm plate
+            space.add_lwpolyline([(0, 0), (150, 0), (150, 150), (0, 150)], close=True)
+            # Hole of radius 8 and concentric countersunk circle of radius 6 at center (75, 75)
+            space.add_circle((75, 75), 8)
+            space.add_circle((75, 75), 6)
+            drawing.saveas(source)
+
+            parts = load_parts(source)
+            # Must remain 1 part, not extract a phantom 6mm coin or washer
+            self.assertEqual(len(parts), 1)
+            self.assertAlmostEqual(parts[0].size[0], 150.0)
+            self.assertAlmostEqual(parts[0].size[1], 150.0)
+            self.assertEqual(len(parts[0].paths), 3)
+
+    def test_letter_cutout_with_inner_island_retained_in_part(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'sign_plate.dxf'
+            drawing = ezdxf.new()
+            drawing.units = ezdxf.units.MM
+            space = drawing.modelspace()
+            # 250 x 80 mm plate
+            space.add_lwpolyline([(0, 0), (250, 0), (250, 80), (0, 80)], close=True)
+            # Letter 'O' cutout: outer loop (r=8) and inner counter loop (r=1.5)
+            space.add_circle((50, 40), 8)
+            space.add_circle((50, 40), 1.5)
+            # Two regular mounting slots
+            space.add_lwpolyline([(120, 30), (160, 30), (160, 50), (120, 50)], close=True)
+            space.add_lwpolyline([(180, 30), (220, 30), (220, 50), (180, 50)], close=True)
+            drawing.saveas(source)
+
+            parts = load_parts(source)
+            self.assertEqual(len(parts), 1)
+            self.assertAlmostEqual(parts[0].size[0], 250.0)
+            self.assertAlmostEqual(parts[0].size[1], 80.0)
+            self.assertEqual(len(parts[0].paths), 5)
+
+    def test_unlisted_entity_layer_does_not_crash(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'unlisted_layer.dxf'
+            drawing = ezdxf.new()
+            drawing.units = ezdxf.units.MM
+            space = drawing.modelspace()
+            # Add entity with layer that does not exist in drawing.layers table
+            line = space.add_lwpolyline([(0, 0), (100, 0), (100, 50), (0, 50)], close=True)
+            line.dxf.layer = 'UNDECLARED_CUSTOM_LAYER'
+            drawing.saveas(source)
+
+            parts = load_parts(source)
+            self.assertEqual(len(parts), 1)
+            self.assertAlmostEqual(parts[0].size[0], 100.0)
+            self.assertAlmostEqual(parts[0].size[1], 50.0)
+
+    def test_real_sample_boresh_lezer_and_three_sheets_if_present(self):
+        boresh = Path('/home/aliap/boresh_lezer_markazi.dxf')
+        if boresh.exists():
+            parts = load_parts(boresh)
+            self.assertEqual(len(parts), 1)
+            self.assertAlmostEqual(parts[0].size[0], 300.0)
+            self.assertAlmostEqual(parts[0].size[1], 65.0)
+            self.assertEqual(len(parts[0].paths), 31)
+
+        three_sheets = Path('/home/aliap/kargah/samples/three-ready-sheets-with-parts.dxf')
+        if three_sheets.exists():
+            parts = load_parts(three_sheets)
+            self.assertEqual(len(parts), 3)
+
 
 if __name__ == '__main__':
     unittest.main()
