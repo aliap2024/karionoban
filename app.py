@@ -563,7 +563,7 @@ def load_parts(filename, input_mm=False):
             cp = ((px0 + px1) / 2, (py0 + py1) / 2)
             clearance = min(abs(x0 - px0), abs(x1 - px1), abs(y0 - py0), abs(y1 - py1))
             concentric = math.dist(ci, cp) <= max(2.0, 0.05 * p_span)
-            is_countersink = concentric and (clearance <= 3.5 or areas[i] / max(areas[p], 1e-9) > 0.6)
+            is_countersink = concentric and (clearance <= 6.0 or (areas[p] < 2500.0 and areas[i] / max(areas[p], 1e-9) > 0.35))
             if areas[i] < 50.0 or span < 8.0 or is_countersink:
                 is_part[i] = False
             else:

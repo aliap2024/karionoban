@@ -1,3 +1,4 @@
+import math
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -360,14 +361,17 @@ class ReportTests(unittest.TestCase):
         self.assertIn('OutFile "LaserMarkazi-Setup-1.0.6.exe"', nsi_code)
 
     def test_step_3d_file_loading_and_pdf_export(self):
+        try:
+            from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+            from OCP.IFSelect import IFSelect_RetDone
+            from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
+        except ImportError:
+            raise unittest.SkipTest("OCP (OpenCASCADE) is not installed in this environment")
         import subprocess
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(folder)
             # 1. Test synthetic STEP file
             step_file = folder / 'bracket-3mm-q5.step'
-            from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
-            from OCP.IFSelect import IFSelect_RetDone
-            from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
             writer = STEPControl_Writer()
             writer.Transfer(BRepPrimAPI_MakeBox(100, 50, 10).Shape(), STEPControl_AsIs)
             self.assertEqual(writer.Write(str(step_file)), IFSelect_RetDone)
@@ -459,12 +463,15 @@ class ReportTests(unittest.TestCase):
         self.assertTrue(np.all((rgb >= 80) & (rgb <= 90)), rgb)
 
     def test_step_holes_hidden_edges_units_and_invalid_geometry(self):
+        try:
+            from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+            from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder
+            from OCP.IFSelect import IFSelect_RetDone
+            from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
+            from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
+        except ImportError:
+            raise unittest.SkipTest("OCP (OpenCASCADE) is not installed in this environment")
         import numpy as np
-        from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
-        from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder
-        from OCP.IFSelect import IFSelect_RetDone
-        from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
-        from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / 'plate-q2.step'
             box = BRepPrimAPI_MakeBox(40, 30, 2).Shape()
@@ -857,6 +864,148 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(result.total_required, 8)
             self.assertEqual(result.total_nested, 8)
             self.assertEqual(result.matched_count, 2)
+
+    def test_multi_scenario_robustness_part1_and_part2(self):
+        with tempfile.TemporaryDirectory() as folder:
+            f = Path(folder)
+
+            # --- Scenario 1.1: Circular Flange with 8 bolt holes + center bore ---
+            flange_dxf = f / 'flange.dxf'
+            dwg = ezdxf.new()
+            dwg.units = ezdxf.units.MM
+            sp = dwg.modelspace()
+            sp.add_circle((0, 0), 100)  # Outer OD 200
+            sp.add_circle((0, 0), 25)   # Bore ID 50
+            for i in range(8):
+                ang = i * (2 * math.pi / 8)
+                sp.add_circle((70 * math.cos(ang), 70 * math.sin(ang)), 5)
+            dwg.saveas(flange_dxf)
+            p_flange = load_parts(flange_dxf)
+            self.assertEqual(len(p_flange), 1)
+            self.assertEqual(len(p_flange[0].paths), 10)  # 1 outer + 1 bore + 8 holes
+
+            # --- Scenario 1.2: L-shaped bracket with 3 non-round slots ---
+            bracket_dxf = f / 'l_bracket.dxf'
+            dwg = ezdxf.new()
+            dwg.units = ezdxf.units.MM
+            sp = dwg.modelspace()
+            sp.add_lwpolyline([(0, 0), (120, 0), (120, 40), (40, 40), (40, 120), (0, 120)], close=True)
+            sp.add_lwpolyline([(10, 10), (30, 10), (30, 25), (10, 25)], close=True)
+            sp.add_lwpolyline([(60, 10), (100, 10), (100, 25), (60, 25)], close=True)
+            sp.add_lwpolyline([(10, 60), (25, 60), (25, 100), (10, 100)], close=True)
+            dwg.saveas(bracket_dxf)
+            p_bracket = load_parts(bracket_dxf)
+            self.assertEqual(len(p_bracket), 1)
+            self.assertEqual(len(p_bracket[0].paths), 4)
+
+            # --- Scenario 1.3: Large 600x400 cover with 18 cutouts ---
+            cover_dxf = f / 'cover.dxf'
+            dwg = ezdxf.new()
+            dwg.units = ezdxf.units.MM
+            sp = dwg.modelspace()
+            sp.add_lwpolyline([(0, 0), (600, 0), (600, 400), (0, 400)], close=True)
+            for row in range(3):
+                for col in range(6):
+                    cx, cy = 60 + col * 90, 80 + row * 110
+                    sp.add_lwpolyline([(cx, cy), (cx + 50, cy), (cx + 50, cy + 40), (cx, cy + 40)], close=True)
+            dwg.saveas(cover_dxf)
+            p_cover = load_parts(cover_dxf)
+            self.assertEqual(len(p_cover), 1)
+            self.assertEqual(len(p_cover[0].paths), 19)
+
+            # --- Scenario 1.4: Multi-concentric hole (counterbore + countersink + through-hole) ---
+            cbore_dxf = f / 'cbore_plate.dxf'
+            dwg = ezdxf.new()
+            dwg.units = ezdxf.units.MM
+            sp = dwg.modelspace()
+            sp.add_lwpolyline([(0, 0), (100, 0), (100, 100), (0, 100)], close=True)
+            sp.add_circle((50, 50), 12)  # counterbore dia 24
+            sp.add_circle((50, 50), 8)   # countersink dia 16 (clearance 4.0mm)
+            sp.add_circle((50, 50), 5)   # through-hole dia 10 (clearance 3.0mm)
+            dwg.saveas(cbore_dxf)
+            p_cbore = load_parts(cbore_dxf)
+            self.assertEqual(len(p_cbore), 1)
+            self.assertEqual(len(p_cbore[0].paths), 4)
+
+            # --- Scenario 2.1: Multi-sheet nesting across 2 sheets ---
+            nest1_dxf = f / 'sheet1.dxf'
+            dwg1 = ezdxf.new()
+            dwg1.units = ezdxf.units.MM
+            sp1 = dwg1.modelspace()
+            sp1.add_lwpolyline([(0, 0), (1000, 0), (1000, 1000), (0, 1000)], close=True, dxfattribs={'layer': 'SHEET_1'})
+            for i in range(12):
+                x = 50 + (i % 4) * 220
+                y = 50 + (i // 4) * 220
+                sp1.add_lwpolyline([(x, y), (x + 180, y), (x + 180, y + 100), (x, y + 100)], close=True)
+            dwg1.saveas(nest1_dxf)
+
+            nest2_dxf = f / 'sheet2.dxf'
+            dwg2 = ezdxf.new()
+            dwg2.units = ezdxf.units.MM
+            sp2 = dwg2.modelspace()
+            sp2.add_lwpolyline([(0, 0), (1000, 0), (1000, 1000), (0, 1000)], close=True, dxfattribs={'layer': 'SHEET_2'})
+            for i in range(12):
+                x = 50 + (i % 4) * 220
+                y = 50 + (i // 4) * 220
+                sp2.add_lwpolyline([(x, y), (x + 180, y), (x + 180, y + 100), (x, y + 100)], close=True)
+            dwg2.saveas(nest2_dxf)
+
+            target_part = f / 'panel-q24.dxf'
+            dwgt = ezdxf.new()
+            dwgt.units = ezdxf.units.MM
+            spt = dwgt.modelspace()
+            spt.add_lwpolyline([(0, 0), (180, 0), (180, 100), (0, 100)], close=True)
+            dwgt.saveas(target_part)
+
+            res_multisheet = compare_nesting([nest1_dxf, nest2_dxf], [target_part])
+            self.assertTrue(res_multisheet.is_match)
+            self.assertEqual(res_multisheet.total_nested, 24)
+            self.assertEqual(res_multisheet.total_required, 24)
+
+            # --- Scenario 2.2: Rotated angles (0, 90, 180, 270) ---
+            from app import Part
+            p_orig = Part(Path('orig.dxf'), [[(0, 0), (80, 0), (80, 40), (0, 40), (0, 0)]], (0, 0, 80, 40), 4)
+            p_rot0 = Part(Path('nes.dxf'), [[(0, 0), (80, 0), (80, 40), (0, 40), (0, 0)]], (0, 0, 80, 40), 1)
+            p_rot90 = Part(Path('nes.dxf'), [[(0, 0), (0, 80), (-40, 80), (-40, 0), (0, 0)]], (-40, 0, 0, 80), 1)
+            p_rot180 = Part(Path('nes.dxf'), [[(0, 0), (-80, 0), (-80, -40), (0, -40), (0, 0)]], (-80, -40, 0, 0), 1)
+            p_rot270 = Part(Path('nes.dxf'), [[(0, 0), (0, -80), (40, -80), (40, 0), (0, 0)]], (0, -80, 40, 0), 1)
+            res_rot = compare_nesting([p_rot0, p_rot90, p_rot180, p_rot270], [p_orig])
+            self.assertTrue(res_rot.is_match)
+            self.assertEqual(res_rot.total_nested, 4)
+
+            # --- Scenario 2.3: Hole discrepancy / CAM revision mismatch ---
+            p_with_hole = Part(Path('panel_v1.dxf'), [
+                [(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)],
+                [(45, 45), (55, 45), (55, 55), (45, 55), (45, 45)]
+            ], (0, 0, 100, 100), 1)
+            p_without_hole = Part(Path('nest_v2.dxf'), [
+                [(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)]
+            ], (0, 0, 100, 100), 1)
+            res_diff = compare_nesting([p_without_hole], [p_with_hole])
+            self.assertFalse(res_diff.is_match)
+            self.assertEqual(res_diff.missing_count, 1)
+            self.assertEqual(res_diff.extra_count, 1)
+
+            # --- Scenario 2.4: Sheet metal enclosure with 4 bend lines ---
+            enc_part = Part(Path('enclosure.dxf'), [
+                [(0, 0), (200, 0), (200, 200), (0, 200), (0, 0)]
+            ], (0, 0, 200, 200), 2, open_paths=[
+                [(30, 0), (30, 200)],
+                [(170, 0), (170, 200)],
+                [(0, 30), (200, 30)],
+                [(0, 170), (200, 170)]
+            ])
+            enc_nest_same = Part(Path('sheet_enc.dxf'), [
+                [(0, 0), (200, 0), (200, 200), (0, 200), (0, 0)]
+            ], (0, 0, 200, 200), 2, open_paths=[
+                [(30, 0), (30, 200)],
+                [(170, 0), (170, 200)],
+                [(0, 30), (200, 30)],
+                [(0, 170), (200, 170)]
+            ])
+            res_enc = compare_nesting([enc_nest_same], [enc_part], include_open_lines=True)
+            self.assertTrue(res_enc.is_match)
+            self.assertEqual(res_enc.matched_count, 1)
 
 
 if __name__ == '__main__':
