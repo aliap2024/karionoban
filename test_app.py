@@ -4,7 +4,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 import ezdxf
-from app import load_part, load_parts, export_pdf, validate_counts
+from app import load_part, load_parts, export_pdf, validate_counts, compare_nesting, CompareResult, CompareItem
 
 
 class ReportTests(unittest.TestCase):
@@ -722,6 +722,141 @@ class ReportTests(unittest.TestCase):
         if three_sheets.exists():
             parts = load_parts(three_sheets)
             self.assertEqual(len(parts), 3)
+
+    def test_compare_nesting_exact_match(self):
+        from app import Part
+        # Expected individual parts: A (qty 4) and B (qty 6)
+        part_a = Part(Path('partA.dxf'), [[(0, 0), (100, 0), (100, 50), (0, 50), (0, 0)]], (0, 0, 100, 50), 4)
+        part_b = Part(Path('partB.dxf'), [[(0, 0), (80, 0), (80, 80), (0, 80), (0, 0)]], (0, 0, 80, 80), 6)
+
+        # Nested parts: identical shapes and quantities (even rotated)
+        nes_a = Part(Path('nested_sheet.dxf'), [[(0, 0), (0, 100), (-50, 100), (-50, 0), (0, 0)]], (-50, 0, 0, 100), 4)
+        nes_b = Part(Path('nested_sheet.dxf'), [[(10, 10), (90, 10), (90, 90), (10, 90), (10, 10)]], (10, 10, 90, 90), 6)
+
+        result = compare_nesting([nes_a, nes_b], [part_a, part_b])
+        self.assertTrue(result.is_match)
+        self.assertEqual(result.total_required, 10)
+        self.assertEqual(result.total_nested, 10)
+        self.assertEqual(result.matched_count, 2)
+        self.assertEqual(result.mismatched_count, 0)
+        self.assertEqual(result.missing_count, 0)
+        self.assertEqual(result.extra_count, 0)
+        self.assertTrue(all(it.status == 'MATCH' and it.diff == 0 for it in result.items))
+
+    def test_compare_nesting_mismatch_missing_and_extra(self):
+        from app import Part
+        # Expected parts:
+        # Part A (req: 10), Part B (req: 5)
+        part_a = Part(Path('partA.dxf'), [[(0, 0), (100, 0), (100, 50), (0, 50), (0, 0)]], (0, 0, 100, 50), 10)
+        part_b = Part(Path('partB.dxf'), [[(0, 0), (80, 0), (80, 80), (0, 80), (0, 0)]], (0, 0, 80, 80), 5)
+
+        # Nested layout:
+        # Part A (nested only 8 -> shortage -2)
+        # Part C (nested 3 -> unexpected extra)
+        # Part B is missing completely!
+        nes_a = Part(Path('sheet.dxf'), [[(0, 0), (100, 0), (100, 50), (0, 50), (0, 0)]], (0, 0, 100, 50), 8)
+        nes_c = Part(Path('sheet.dxf'), [[(0, 0), (30, 0), (30, 30), (0, 30), (0, 0)]], (0, 0, 30, 30), 3)
+
+        result = compare_nesting([nes_a, nes_c], [part_a, part_b])
+        self.assertFalse(result.is_match)
+        self.assertEqual(result.matched_count, 0)
+        self.assertEqual(result.mismatched_count, 1)  # Part A
+        self.assertEqual(result.missing_count, 1)     # Part B
+        self.assertEqual(result.extra_count, 1)       # Part C
+
+        item_map = {it.name: it for it in result.items}
+        self.assertEqual(item_map['partA.dxf'].status, 'QUANTITY_MISMATCH')
+        self.assertEqual(item_map['partA.dxf'].required_qty, 10)
+        self.assertEqual(item_map['partA.dxf'].nested_qty, 8)
+        self.assertEqual(item_map['partA.dxf'].diff, -2)
+
+        self.assertEqual(item_map['partB.dxf'].status, 'MISSING_IN_NEST')
+        self.assertEqual(item_map['partB.dxf'].required_qty, 5)
+        self.assertEqual(item_map['partB.dxf'].nested_qty, 0)
+        self.assertEqual(item_map['partB.dxf'].diff, -5)
+
+        self.assertEqual(item_map['sheet.dxf'].status, 'EXTRA_IN_NEST')
+        self.assertEqual(item_map['sheet.dxf'].required_qty, 0)
+        self.assertEqual(item_map['sheet.dxf'].nested_qty, 3)
+        self.assertEqual(item_map['sheet.dxf'].diff, 3)
+
+    def test_compare_nesting_open_bend_lines_toggle(self):
+        from app import Part
+        # Individual part has bend line at x=30
+        part_with_bend = Part(Path('bracket.dxf'),
+                              [[(0, 0), (100, 0), (100, 50), (0, 50), (0, 0)]],
+                              (0, 0, 100, 50), 2,
+                              open_paths=[[(30, 0), (30, 50)]])
+
+        # Nested part on sheet has the same 100x50 outline, but bend line at x=40
+        nes_diff_bend = Part(Path('nest_sheet.dxf'),
+                             [[(0, 0), (100, 0), (100, 50), (0, 50), (0, 0)]],
+                             (0, 0, 100, 50), 2,
+                             open_paths=[[(40, 0), (40, 50)]])
+
+        # Nested part with EXACT same bend line (at x=30)
+        nes_exact_bend = Part(Path('nest_sheet.dxf'),
+                              [[(0, 0), (100, 0), (100, 50), (0, 50), (0, 0)]],
+                              (0, 0, 100, 50), 2,
+                              open_paths=[[(30, 0), (30, 50)]])
+
+        # 1. When include_open_lines=False (checkbox OFF):
+        # Bend lines are ignored, so closed cut boundaries match!
+        res_ignore_bends = compare_nesting([nes_diff_bend], [part_with_bend], include_open_lines=False)
+        self.assertTrue(res_ignore_bends.is_match)
+        self.assertEqual(res_ignore_bends.matched_count, 1)
+
+        # 2. When include_open_lines=True (checkbox ON):
+        # Bend lines MUST match! With bend at 40 vs 30, it fails to match!
+        res_check_bends_diff = compare_nesting([nes_diff_bend], [part_with_bend], include_open_lines=True)
+        self.assertFalse(res_check_bends_diff.is_match)
+        self.assertEqual(res_check_bends_diff.missing_count, 1)
+        self.assertEqual(res_check_bends_diff.extra_count, 1)
+
+        # 3. When include_open_lines=True with EXACT same bend line:
+        res_check_bends_match = compare_nesting([nes_exact_bend], [part_with_bend], include_open_lines=True)
+        self.assertTrue(res_check_bends_match.is_match)
+        self.assertEqual(res_check_bends_match.matched_count, 1)
+
+    def test_compare_nesting_from_dxf_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            f = Path(folder)
+            # Create nested layout with 2 parts on a sheet: 5x Part A, 3x Part B
+            nest_file = f / 'nest_sheet.dxf'
+            dwg = ezdxf.new()
+            dwg.units = ezdxf.units.MM
+            sp = dwg.modelspace()
+            # Sheet border
+            sp.add_lwpolyline([(0, 0), (1000, 0), (1000, 500), (0, 500)], close=True, dxfattribs={'layer': 'SHEET_1'})
+            # 5 copies of 100x50 part
+            for i in range(5):
+                sp.add_lwpolyline([(50 + i * 120, 50), (150 + i * 120, 50), (150 + i * 120, 100), (50 + i * 120, 100)], close=True)
+            # 3 copies of 80x80 part
+            for i in range(3):
+                sp.add_lwpolyline([(50 + i * 100, 200), (130 + i * 100, 200), (130 + i * 100, 280), (50 + i * 100, 280)], close=True)
+            dwg.saveas(nest_file)
+
+            # Create individual part files:
+            # partA-q5.dxf
+            part_a_file = f / 'partA-q5.dxf'
+            dwg_a = ezdxf.new()
+            dwg_a.units = ezdxf.units.MM
+            dwg_a.modelspace().add_lwpolyline([(0, 0), (100, 0), (100, 50), (0, 50)], close=True)
+            dwg_a.saveas(part_a_file)
+
+            # partB-q3.dxf
+            part_b_file = f / 'partB-q3.dxf'
+            dwg_b = ezdxf.new()
+            dwg_b.units = ezdxf.units.MM
+            dwg_b.modelspace().add_lwpolyline([(0, 0), (80, 0), (80, 80), (0, 80)], close=True)
+            dwg_b.saveas(part_b_file)
+
+            # Run comparison directly using file paths
+            result = compare_nesting([nest_file], [part_a_file, part_b_file])
+            self.assertTrue(result.is_match)
+            self.assertEqual(result.total_required, 8)
+            self.assertEqual(result.total_nested, 8)
+            self.assertEqual(result.matched_count, 2)
 
 
 if __name__ == '__main__':
