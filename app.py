@@ -8,6 +8,7 @@ import re
 import tempfile
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import ezdxf
 from ezdxf import units
@@ -847,8 +848,8 @@ class CompareItem:
     nested_qty: int
     diff: int
     thickness: str = ''
-    part_obj: Any = None
-    nested_obj: Any = None
+    part_obj: object = None
+    nested_obj: object = None
     note: str = ''
 
 
@@ -1379,4 +1380,20 @@ if __name__ == '__main__':
             name=args.name, date=args.date, day=args.day
         )
     else:
-        desktop()
+        try:
+            desktop()
+        except Exception as exc:
+            import traceback
+            tb = traceback.format_exc()
+            log_dir = Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'LaserMarkazi'
+            log_file = log_dir / 'app-crash.log' if log_dir.exists() else Path(tempfile.gettempdir()) / 'LaserMarkazi-app-crash.log'
+            try:
+                log_file.write_text(tb, encoding='utf-8')
+            except Exception:
+                pass
+            try:
+                import tkinter.messagebox as mb
+                mb.showerror('خطا در اجرای برنامه', f'برنامه با خطا مواجه شد:\n{exc}\n\nگزارش کامل در:\n{log_file}')
+            except Exception:
+                pass
+            raise
