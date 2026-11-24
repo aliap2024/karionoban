@@ -15,6 +15,7 @@ def build(offline=False):
     ]
     for placeholder, path in placeholders:
         encoded = base64.b64encode(path.read_bytes()).decode('ascii')
+        assert placeholder in script, f'Missing installer placeholder: {placeholder}'
         script = script.replace(placeholder, encoded)
         assert base64.b64decode(encoded) == path.read_bytes()
     for placeholder, _ in placeholders:

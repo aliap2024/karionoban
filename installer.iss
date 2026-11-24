@@ -1,7 +1,7 @@
 [Setup]
 AppId=LaserMarkazi
 AppName=لیزر مرکزی
-AppVersion=1.0.4
+AppVersion=1.0.6
 DefaultDirName={localappdata}\Programs\لیزر مرکزی
 DefaultGroupName=لیزر مرکزی
 PrivilegesRequired=lowest

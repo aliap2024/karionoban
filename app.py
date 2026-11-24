@@ -17,6 +17,7 @@ import numpy as np
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen.canvas import Canvas
+from reportlab.lib.utils import ImageReader
 
 
 def _natural_size(polygon):
@@ -234,409 +235,203 @@ def _same_shape(paths, other, tolerance):
 
 
 def _load_step(filename):
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
+    from OCP.BRepBndLib import BRepBndLib
+    from OCP.BRepMesh import BRepMesh_IncrementalMesh
+    from OCP.Bnd import Bnd_Box
+    from OCP.GCPnts import GCPnts_QuasiUniformDeflection
+    from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Line
+    from OCP.HLRAlgo import HLRAlgo_Projector
+    from OCP.HLRBRep import HLRBRep_Algo, HLRBRep_HLRToShape
+    from OCP.IFSelect import IFSelect_RetDone
+    from OCP.STEPControl import STEPControl_Reader
+    from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopLoc import TopLoc_Location
+    from OCP.TopoDS import TopoDS
+    from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
+
     source = Path(filename)
-    text = source.read_text(encoding='utf-8', errors='ignore')
-    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
-
-    tokens = []
-    current = []
-    in_str = False
-    for char in text:
-        if char == "'":
-            in_str = not in_str
-            current.append(char)
-        elif char == ';' and not in_str:
-            tokens.append(''.join(current).strip())
-            current = []
-        else:
-            current.append(char)
-
-    entities = {}
-    for tok in tokens:
-        m = re.match(r'^#(\d+)\s*=\s*([A-Z0-9_]+)\s*\((.*)\)$', tok, re.DOTALL | re.IGNORECASE)
-        if m:
-            entities[int(m.group(1))] = (m.group(2).upper(), m.group(3).strip())
-
-    if not entities:
-        raise ValueError('No valid STEP entities found')
-
-    def parse_args(s):
-        parts, curr, depth, in_q = [], [], 0, False
-        for c in s:
-            if c == "'":
-                in_q = not in_q
-                curr.append(c)
-            elif not in_q:
-                if c == '(':
-                    depth += 1
-                    curr.append(c)
-                elif c == ')':
-                    depth -= 1
-                    curr.append(c)
-                elif c == ',' and depth == 0:
-                    parts.append(''.join(curr).strip())
-                    curr = []
-                else:
-                    curr.append(c)
-            else:
-                curr.append(c)
-        if curr:
-            parts.append(''.join(curr).strip())
-        return parts
-
-    def get_ref(s):
-        m = re.search(r'#(\d+)', s)
-        return int(m.group(1)) if m else None
-
-    def get_point(ref):
-        if ref not in entities:
-            return None
-        name, body = entities[ref]
-        if name == 'VERTEX_POINT':
-            args = parse_args(body)
-            return get_point(get_ref(args[1])) if len(args) > 1 else None
-        elif name == 'CARTESIAN_POINT':
-            m = re.search(r'\(([^)]+)\)', body)
-            if m:
-                coords = [float(x.strip()) for x in m.group(1).split(',')]
-                while len(coords) < 3:
-                    coords.append(0.0)
-                return np.array(coords[:3], dtype=float)
-        return None
-
-    def get_direction(ref):
-        if ref is None or ref not in entities:
-            return None
-        name, body = entities[ref]
-        if name == 'DIRECTION':
-            m = re.search(r'\(([^)]+)\)', body)
-            if m:
-                coords = [float(x.strip()) for x in m.group(1).split(',')]
-                while len(coords) < 3:
-                    coords.append(0.0)
-                v = np.array(coords[:3], dtype=float)
-                norm = np.linalg.norm(v)
-                return v / norm if norm > 1e-12 else v
-        return None
-
-    def discretize_circle(center, axis, ref_dir, radius, p1, p2, same_sense):
-        z_ax = axis if axis is not None else np.array([0., 0., 1.])
-        z_norm = np.linalg.norm(z_ax)
-        z_ax = np.array([0., 0., 1.]) if z_norm < 1e-12 else z_ax / z_norm
-
-        x_ax = ref_dir if ref_dir is not None else np.array([1., 0., 0.])
-        x_ax = x_ax - np.dot(x_ax, z_ax) * z_ax
-        x_norm = np.linalg.norm(x_ax)
-        if x_norm < 1e-6:
-            arb = np.array([0., 1., 0.]) if abs(z_ax[0]) > 0.9 else np.array([1., 0., 0.])
-            x_ax = np.cross(z_ax, arb)
-            x_norm = np.linalg.norm(x_ax)
-        x_ax = x_ax / x_norm
-        y_ax = np.cross(z_ax, x_ax)
-
-        if p1 is None or p2 is None or np.linalg.norm(p1 - p2) < 1e-5:
-            thetas = np.linspace(0, 2 * math.pi, 36)
-        else:
-            v1, v2 = p1 - center, p2 - center
-            th1 = math.atan2(np.dot(v1, y_ax), np.dot(v1, x_ax))
-            th2 = math.atan2(np.dot(v2, y_ax), np.dot(v2, x_ax))
-            if same_sense:
-                dth = (th2 - th1) % (2 * math.pi)
-                if dth <= 1e-9:
-                    dth += 2 * math.pi
-                thetas = th1 + np.linspace(0, dth, max(6, int(math.ceil(math.degrees(dth) / 10))))
-            else:
-                dth = (th1 - th2) % (2 * math.pi)
-                if dth <= 1e-9:
-                    dth += 2 * math.pi
-                thetas = th1 - np.linspace(0, dth, max(6, int(math.ceil(math.degrees(dth) / 10))))
-        return [center + radius * (math.cos(th) * x_ax + math.sin(th) * y_ax) for th in thetas]
-
-    def get_curve_points(eid, forward=True):
-        if eid not in entities:
-            return []
-        args = parse_args(entities[eid][1])
-        if len(args) < 4:
-            return []
-        p1 = get_point(get_ref(args[1]))
-        p2 = get_point(get_ref(args[2]))
-        geom_ref = get_ref(args[3])
-        same_sense = len(args) <= 4 or (args[4].strip().upper() != '.F.')
-        if not forward:
-            p1, p2 = p2, p1
-            same_sense = not same_sense
-        if geom_ref not in entities:
-            return [p1, p2] if (p1 is not None and p2 is not None) else []
-        gname, gbody = entities[geom_ref]
-        if gname == 'LINE':
-            return [p1, p2] if (p1 is not None and p2 is not None) else []
-        elif gname == 'CIRCLE':
-            c_args = parse_args(gbody)
-            if len(c_args) >= 3:
-                axis2_ref = get_ref(c_args[1])
-                try:
-                    radius = float(c_args[2])
-                except ValueError:
-                    radius = 1.0
-                if axis2_ref in entities:
-                    a_args = parse_args(entities[axis2_ref][1])
-                    center = get_point(get_ref(a_args[1])) if len(a_args) > 1 else np.array([0., 0., 0.])
-                    axis = get_direction(get_ref(a_args[2])) if len(a_args) > 2 and a_args[2] != '$' else None
-                    ref_dir = get_direction(get_ref(a_args[3])) if len(a_args) > 3 and a_args[3] != '$' else None
-                    return discretize_circle(center, axis, ref_dir, radius, p1, p2, same_sense)
-        return [p1, p2] if (p1 is not None and p2 is not None) else []
-
-    parsed_faces = []
-    for fid, (fname, fbody) in entities.items():
-        if fname == 'ADVANCED_FACE':
-            args = parse_args(fbody)
-            outer_bound = None
-            for a in args:
-                ref = get_ref(a)
-                if ref and ref in entities and entities[ref][0] == 'FACE_OUTER_BOUND':
-                    outer_bound = ref
-                    break
-            if not outer_bound:
-                continue
-            loop_ref = get_ref(parse_args(entities[outer_bound][1])[1])
-            if not loop_ref or loop_ref not in entities:
-                continue
-            loop_body = entities[loop_ref][1]
-            oe_refs = [int(r) for r in re.findall(r'#(\d+)', loop_body)]
-            outer_pts = []
-            for oe in oe_refs:
-                if oe not in entities or entities[oe][0] != 'ORIENTED_EDGE':
-                    continue
-                oe_args = parse_args(entities[oe][1])
-                if len(oe_args) < 5:
-                    continue
-                edge_ref = get_ref(oe_args[3])
-                forward = (oe_args[4].strip().upper() == '.T.')
-                pts = get_curve_points(edge_ref, forward=forward)
-                if pts:
-                    if outer_pts and np.linalg.norm(outer_pts[-1] - pts[0]) < 1e-3:
-                        outer_pts.extend(pts[1:])
-                    else:
-                        outer_pts.extend(pts)
-            if len(outer_pts) >= 3:
-                pts_arr = np.array(outer_pts)
-                v1 = pts_arr[1] - pts_arr[0]
-                v2 = pts_arr[-1] - pts_arr[0]
-                norm = np.cross(v1, v2)
-                n_len = np.linalg.norm(norm)
-                norm = norm / n_len if n_len > 1e-6 else np.array([0., 0., 1.])
-                parsed_faces.append({'pts': pts_arr, 'normal': norm, 'center': pts_arr.mean(axis=0)})
-
-    curves = []
-    straight_edges = []
-    for eid, (ename, ebody) in entities.items():
-        if ename == 'EDGE_CURVE':
-            args = parse_args(ebody)
-            if len(args) < 4:
-                continue
-            p1 = get_point(get_ref(args[1]))
-            p2 = get_point(get_ref(args[2]))
-            geom_ref = get_ref(args[3])
-            same_sense = len(args) <= 4 or (args[4].strip().upper() != '.F.')
-            if geom_ref not in entities:
-                if p1 is not None and p2 is not None:
-                    curves.append([p1, p2])
-                    vec = p2 - p1
-                    L = float(np.linalg.norm(vec))
-                    if L > 1e-3:
-                        straight_edges.append((vec / L, L))
-                continue
-            gname, gbody = entities[geom_ref]
-            if gname == 'LINE':
-                if p1 is not None and p2 is not None:
-                    curves.append([p1, p2])
-                    vec = p2 - p1
-                    L = float(np.linalg.norm(vec))
-                    if L > 1e-3:
-                        straight_edges.append((vec / L, L))
-            elif gname == 'CIRCLE':
-                c_args = parse_args(gbody)
-                if len(c_args) >= 3:
-                    axis2_ref = get_ref(c_args[1])
-                    try:
-                        radius = float(c_args[2])
-                    except ValueError:
-                        radius = 1.0
-                    if axis2_ref in entities:
-                        a_args = parse_args(entities[axis2_ref][1])
-                        center = get_point(get_ref(a_args[1])) if len(a_args) > 1 else np.array([0., 0., 0.])
-                        axis = get_direction(get_ref(a_args[2])) if len(a_args) > 2 and a_args[2] != '$' else None
-                        ref_dir = get_direction(get_ref(a_args[3])) if len(a_args) > 3 and a_args[3] != '$' else None
-                        curves.append(discretize_circle(center, axis, ref_dir, radius, p1, p2, same_sense))
-                    elif p1 is not None and p2 is not None:
-                        curves.append([p1, p2])
-            elif p1 is not None and p2 is not None:
-                curves.append([p1, p2])
-
-    bend_cyl_axes = []
-    for eid, (name, body) in entities.items():
-        if name == 'CYLINDRICAL_SURFACE':
-            args = parse_args(body)
-            if len(args) >= 3:
-                axis_ref = get_ref(args[1])
-                try:
-                    radius = float(args[2])
-                except Exception:
-                    radius = 0.0
-                if 0.5 <= radius <= 25.0 and axis_ref in entities:
-                    a_args = parse_args(entities[axis_ref][1])
-                    if len(a_args) >= 3:
-                        d_vec = get_direction(get_ref(a_args[2]))
-                        if d_vec is not None:
-                            bend_cyl_axes.append(d_vec)
-
-    if not curves and not parsed_faces:
+    reader = STEPControl_Reader()
+    if reader.ReadFile(str(source)) != IFSelect_RetDone or not reader.TransferRoots():
+        raise ValueError(f'Cannot read STEP geometry: {source.name}')
+    shape = reader.OneShape()
+    if shape.IsNull():
         raise ValueError('No supported 3D geometry found in STEP file')
 
-    all_pts = np.concatenate([f['pts'] for f in parsed_faces], axis=0) if parsed_faces else np.concatenate(curves, axis=0)
-    c_min = all_pts.min(axis=0)
-    c_max = all_pts.max(axis=0)
-    center = (c_min + c_max) / 2.0
-    extents = c_max - c_min
-    size_3d = (float(extents[0]), float(extents[1]), float(extents[2]))
+    def items(kind):
+        explorer = TopExp_Explorer(shape, kind)
+        while explorer.More():
+            yield explorer.Current()
+            explorer.Next()
 
-    # Determine primary bend axis for 2D profile view
-    candidates = [np.array([1., 0., 0.]), np.array([0., 1., 0.]), np.array([0., 0., 1.])]
-    candidates.extend(bend_cyl_axes)
-    best_dir = np.array([0., 0., 1.])
-    best_score = -1.0
-    for c_dir in candidates:
-        norm = np.linalg.norm(c_dir)
-        if norm < 1e-6:
-            continue
-        u_dir = c_dir / norm
-        score = sum(L for d, L in straight_edges if abs(float(np.dot(d, u_dir))) > 0.98)
-        cyl_count = sum(1 for c_ax in bend_cyl_axes if abs(float(np.dot(c_ax, u_dir))) > 0.98)
-        score += cyl_count * 500.0
-        if score > best_score:
-            best_score = score
-            best_dir = u_dir
+    box = Bnd_Box()
+    BRepBndLib.AddOptimal_s(shape, box)
+    if box.IsVoid():
+        raise ValueError('STEP model has no finite geometry')
+    bounds3d = np.array(box.Get()).reshape(2, 3)
+    size_3d = tuple(bounds3d[1] - bounds3d[0])
+    center = bounds3d.mean(axis=0)
 
-    v_bend = best_dir / np.linalg.norm(best_dir)
-    for i in range(3):
-        if abs(v_bend[i]) > 1e-4:
-            if v_bend[i] < 0:
-                v_bend = -v_bend
-            break
+    # Partial cylinders identify bends; full cylinders are usually drilled holes.
+    candidates = []
+    for face in items(TopAbs_FACE):
+        surface = BRepAdaptor_Surface(TopoDS.Face_s(face))
+        if surface.GetType() == GeomAbs_Cylinder:
+            sweep = surface.LastUParameter() - surface.FirstUParameter()
+            if 1e-5 < sweep < 2 * math.pi - 1e-5:
+                axis = np.array(surface.Cylinder().Axis().Direction().Coord())
+                length = abs(surface.LastVParameter() - surface.FirstVParameter())
+                candidates.append((axis, length * sweep))
+    if not candidates:
+        for edge in items(TopAbs_EDGE):
+            curve = BRepAdaptor_Curve(TopoDS.Edge_s(edge))
+            if curve.GetType() == GeomAbs_Line:
+                start = np.array(curve.Value(curve.FirstParameter()).Coord())
+                end = np.array(curve.Value(curve.LastParameter()).Coord())
+                length = np.linalg.norm(end - start)
+                if length > 1e-6:
+                    candidates.append(((end - start) / length, length))
+    if not candidates:
+        candidates = [(np.array([0., 0., 1.]), 1.)]
+    bend = max(candidates, key=lambda c: sum(w for axis, w in candidates
+               if abs(np.dot(axis, c[0])) > 0.999))[0].copy()
+    if bend[np.argmax(np.abs(bend))] < 0:
+        bend = -bend
+    up = np.array([0., 1., 0.])
+    up -= np.dot(up, bend) * bend
+    if np.linalg.norm(up) < 0.2:
+        up = np.array([0., 0., 1.])
+        up -= np.dot(up, bend) * bend
+    up /= np.linalg.norm(up)
+    across = np.cross(up, bend)
 
-    # Universal orthonormal basis for 2D bending profile view
-    up_ref = np.array([0., 1., 0.])
-    v_vec = up_ref - np.dot(up_ref, v_bend) * v_bend
-    if np.linalg.norm(v_vec) < 0.2:
-        up_ref = np.array([0., 0., 1.])
-        v_vec = up_ref - np.dot(up_ref, v_bend) * v_bend
-    v_vec /= np.linalg.norm(v_vec)
-    u_vec = np.cross(v_vec, v_bend)
-    u_vec /= np.linalg.norm(u_vec)
+    # Use the same local frame for both views, independent of STEP world axes.
+    view = (across + bend + up) / math.sqrt(3)
+    right = (across - bend) / math.sqrt(2)
+    vertical = np.cross(view, right)
 
-    profile_curves = []
-    for c in curves:
-        pts = np.asarray(c)
-        u_coords = pts @ u_vec
-        v_coords = pts @ v_vec
-        pts2d = np.column_stack([u_coords, v_coords])
-        span = pts2d.max(axis=0) - pts2d.min(axis=0)
-        if np.linalg.norm(span) > 0.2:
-            profile_curves.append([(float(p[0]), float(p[1])) for p in pts2d])
+    def visible_paths(direction, x_axis):
+        hlr = HLRBRep_Algo()
+        hlr.Add(shape)
+        hlr.Projector(HLRAlgo_Projector(gp_Ax2(gp_Pnt(*center),
+                      gp_Dir(*direction), gp_Dir(*x_axis))))
+        hlr.Update()
+        hlr.Hide()
+        result = HLRBRep_HLRToShape(hlr)
+        paths = []
+        seen = set()
+        for compound in (result.VCompound(), result.Rg1LineVCompound(), result.OutLineVCompound()):
+            if compound.IsNull():
+                continue
+            explorer = TopExp_Explorer(compound, TopAbs_EDGE)
+            while explorer.More():
+                curve = BRepAdaptor_Curve(TopoDS.Edge_s(explorer.Current()))
+                samples = GCPnts_QuasiUniformDeflection(curve, 0.025)
+                if not samples.IsDone():
+                    raise ValueError('Cannot approximate STEP drawing curve')
+                points = [samples.Value(i).Coord()[:2] for i in range(1, samples.NbPoints() + 1)]
+                if len(points) >= 2:
+                    key = tuple(tuple(round(c, 5) for c in p) for p in points)
+                    key = min(key, key[::-1])
+                    if key not in seen:
+                        seen.add(key)
+                        paths.append(points)
+                explorer.Next()
+        return paths
 
-    if profile_curves:
-        all_prof = np.concatenate(profile_curves, axis=0)
-        p_min = all_prof.min(axis=0)
-        p_max = all_prof.max(axis=0)
-        profile_bounds = (float(p_min[0]), float(p_min[1]), float(p_max[0]), float(p_max[1]))
-    else:
-        profile_bounds = (0.0, 0.0, 1.0, 1.0)
+    profile_paths = visible_paths(bend, across)
+    paths = visible_paths(view, right)
+    if not paths or not profile_paths:
+        raise ValueError('STEP model has no drawable edges')
 
-    if parsed_faces:
-        for f in parsed_faces:
-            f['pts'] -= center
-            f['center'] -= center
+    def bounds(paths):
+        points = np.concatenate(paths)
+        return (*points.min(axis=0), *points.max(axis=0))
 
-    rotated_curves = []
-    if extents[1] >= extents[0] and extents[1] >= extents[2]:
-        for c in curves:
-            pts = np.asarray(c) - center
-            pts_rot = np.column_stack([-pts[:, 1], pts[:, 0], pts[:, 2]])
-            rotated_curves.append(pts_rot)
-        if parsed_faces:
-            for f in parsed_faces:
-                f['pts'] = np.column_stack([-f['pts'][:, 1], f['pts'][:, 0], f['pts'][:, 2]])
-                f['normal'] = np.array([-f['normal'][1], f['normal'][0], f['normal'][2]])
-                f['center'] = np.array([-f['center'][1], f['center'][0], f['center'][2]])
-    elif extents[2] >= extents[0] and extents[2] >= extents[1]:
-        for c in curves:
-            pts = np.asarray(c) - center
-            pts_rot = np.column_stack([pts[:, 2], pts[:, 1], -pts[:, 0]])
-            rotated_curves.append(pts_rot)
-        if parsed_faces:
-            for f in parsed_faces:
-                f['pts'] = np.column_stack([f['pts'][:, 2], f['pts'][:, 1], -f['pts'][:, 0]])
-                f['normal'] = np.array([f['normal'][2], f['normal'][1], -f['normal'][0]])
-                f['center'] = np.array([f['center'][2], f['center'][1], -f['center'][0]])
-    else:
-        for c in curves:
-            rotated_curves.append(np.asarray(c) - center)
-
-    # Standard CAD Isometric View matching engineering drawing sheets
-    yaw = math.radians(-45)
-    pitch = math.radians(30)
-    Rz = np.array([[math.cos(yaw), -math.sin(yaw), 0],
-                   [math.sin(yaw),  math.cos(yaw), 0],
-                   [0, 0, 1]])
-    Rx = np.array([[1, 0, 0],
-                   [0, math.cos(pitch), -math.sin(pitch)],
-                   [0, math.sin(pitch),  math.cos(pitch)]])
-    R = Rx @ Rz
-
-    light_dir = np.array([0.35, 0.45, 0.82])
-    light_dir /= np.linalg.norm(light_dir)
-
-    faces_3d = []
-    if parsed_faces:
-        for f in parsed_faces:
-            rot_pts = f['pts'] @ R.T
-            rot_norm = f['normal'] @ R.T
-            rot_center = f['center'] @ R.T
-            dot = max(0.0, np.dot(rot_norm, light_dir))
-            intensity = 0.55 + 0.40 * dot
-            if rot_norm[2] < 0:
-                intensity = 0.45 + 0.35 * max(0.0, -np.dot(rot_norm, light_dir))
-            gray = float(np.clip(intensity * 0.85, 0.35, 0.95))
-            faces_3d.append({
-                'points': [(float(p[0]), float(p[1])) for p in rot_pts],
-                'depth': float(rot_center[2]),
-                'rgb': (gray, gray, min(1.0, gray * 1.03))
-            })
-        faces_3d.sort(key=lambda x: x['depth'])
-
-    proj_curves = []
-    for c in rotated_curves:
-        pts2d = c @ R.T
-        proj_curves.append([(float(p[0]), float(p[1])) for p in pts2d])
-
-    all_pts_to_bound = np.concatenate([f['points'] for f in faces_3d], axis=0) if faces_3d else np.concatenate(proj_curves, axis=0)
-    p_min = all_pts_to_bound.min(axis=0)
-    p_max = all_pts_to_bound.max(axis=0)
-    bounds = (float(p_min[0]), float(p_min[1]), float(p_max[0]), float(p_max[1]))
-
+    # Triangulation respects inner wires (holes) and curved surfaces.
+    BRepMesh_IncrementalMesh(shape, 0.04, False, 0.12, False)
+    faces = []
+    rotation = np.array([right, vertical, view])
+    light = np.array([-0.3, 0.5, 0.8])
+    light /= np.linalg.norm(light)
+    for face in items(TopAbs_FACE):
+        face = TopoDS.Face_s(face)
+        location = TopLoc_Location()
+        mesh = BRep_Tool.Triangulation_s(face, location)
+        if mesh is None:
+            raise ValueError('Cannot triangulate STEP surface')
+        transform = location.Transformation()
+        mesh.ComputeNormals()
+        for i in range(1, mesh.NbTriangles() + 1):
+            indices = mesh.Triangle(i).Get()
+            points = np.array([mesh.Node(j).Transformed(transform).Coord() for j in indices])
+            points = (points - center) @ rotation.T
+            normal = np.cross(points[1] - points[0], points[2] - points[0])
+            if face.Orientation() == TopAbs_REVERSED:
+                normal = -normal
+            length = np.linalg.norm(normal)
+            if length < 1e-12 or normal[2] <= 0:
+                continue
+            normal /= length
+            normals = np.array([mesh.Normal(j).Transformed(transform).Coord() for j in indices])
+            normals = normals @ rotation.T
+            if face.Orientation() == TopAbs_REVERSED:
+                normals = -normals
+            normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
+            diffuse = np.maximum(normals @ light, 0.)
+            half_light = light + np.array([0., 0., 1.])
+            half_light /= np.linalg.norm(half_light)
+            specular = np.maximum(normals @ half_light, 0.) ** 32
+            colors = np.clip((0.48 + 0.40 * diffuse[:, None]) * np.array([0.70, 0.82, 0.94])
+                             + 0.14 * specular[:, None], 0., 1.)
+            faces.append({'points': points[:, :2].tolist(), 'z': points[:, 2].tolist(),
+                          'rgb': colors.mean(axis=0).tolist(), 'vertex_rgb': colors.tolist()})
     match_q = re.search(r'(?:^|[-_])q(\d+)(?=$|[^0-9])', source.stem, re.I)
-    quantity = int(match_q.group(1)) if match_q else 1
-    if quantity < 1:
-        quantity = 1
-
     match_th = re.search(r'(?:^|[-_])(\d+(?:\.\d+)?)\s*mm(?=$|[^a-z0-9])', source.stem, re.I)
-    thickness = f'{match_th.group(1)}mm' if match_th else ''
+    return [Part(source=source, paths=paths, bounds=bounds(paths),
+                 quantity=max(1, int(match_q.group(1))) if match_q else 1,
+                 thickness=f'{match_th.group(1)}mm' if match_th else '', is_3d=True,
+                 faces_3d=faces, profile_paths=profile_paths,
+                 profile_bounds=bounds(profile_paths), size_3d=size_3d)]
 
-    return [Part(source=source, paths=proj_curves, bounds=bounds, quantity=quantity,
-                 thickness=thickness, is_3d=True, faces_3d=faces_3d if faces_3d else None,
-                 profile_paths=profile_curves if profile_curves else None,
-                 profile_bounds=profile_bounds if profile_curves else None,
-                 size_3d=size_3d)]
+
+def _shade_step(faces, bounds):
+    """Rasterize smooth surface colors with a per-pixel depth buffer; edges stay vector."""
+    from PIL import Image
+
+    x0, y0, x1, y1 = bounds
+    span = np.maximum([x1 - x0, y1 - y0], 1e-9)
+    width, height = np.maximum(2, np.ceil(1000 * span / max(span)).astype(int))
+    depth = np.full((height, width), -np.inf)
+    pixels = np.full((height, width, 3), 255, dtype=np.uint8)
+    for face in faces:
+        points = (np.asarray(face['points']) - [x0, y0]) / span * [width - 1, height - 1]
+        points[:, 1] = height - 1 - points[:, 1]
+        lo = np.maximum(0, np.floor(points.min(axis=0)).astype(int))
+        hi = np.minimum([width - 1, height - 1], np.ceil(points.max(axis=0)).astype(int))
+        if np.any(hi < lo):
+            continue
+        a, b, c = points
+        determinant = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1])
+        if abs(determinant) < 1e-12:
+            continue
+        yy, xx = np.mgrid[lo[1]:hi[1] + 1, lo[0]:hi[0] + 1]
+        u = ((b[1] - c[1]) * (xx - c[0]) + (c[0] - b[0]) * (yy - c[1])) / determinant
+        v = ((c[1] - a[1]) * (xx - c[0]) + (a[0] - c[0]) * (yy - c[1])) / determinant
+        w = 1 - u - v
+        za, zb, zc = face['z']
+        z = u * za + v * zb + w * zc
+        region = np.s_[lo[1]:hi[1] + 1, lo[0]:hi[0] + 1]
+        visible = (u >= -1e-9) & (v >= -1e-9) & (w >= -1e-9) & (z > depth[region])
+        if not visible.any():
+            continue
+        ca, cb, cc = np.asarray(face['vertex_rgb'])
+        colors = u[visible, None] * ca + v[visible, None] * cb + w[visible, None] * cc
+        pixels[region][visible] = np.clip(colors * 255, 0, 255).astype(np.uint8)
+        depth[region][visible] = z[visible]
+    return Image.fromarray(pixels)
 
 
 def load_parts(filename, input_mm=False):
@@ -755,6 +550,7 @@ def validate_counts(part):
 
 def fitted_text(canvas, text, x, y, width, size=8):
     size = min(size, width / max(stringWidth(text, 'Helvetica', 1), 1))
+    canvas.setFillColorRGB(0, 0, 0)
     canvas.setFont('Helvetica', size)
     canvas.drawCentredString(x + width / 2, y, text)
 
@@ -859,17 +655,20 @@ def export_pdf(parts, destination, name='', date='', day='', header=None):
                 if is_3d and profile_paths:
                     shape_x = xs[2]
                     shape_w = widths[2]
-                    sub_w = (shape_w - 8) / 2
+                    profile_w = (shape_w - 8) * 0.28
+                    iso_w = (shape_w - 8) - profile_w
                     avail_h = row_h - 16
 
-                    # 1. Profile View (Left) - Cross-section bend profile ("اون مشکی ها")
+                    # Orthographic bend profile (left).
                     px0, py0, px1, py1 = getattr(part, 'profile_bounds', (0, 0, 1, 1))
                     pw, ph = max(px1 - px0, 1e-6), max(py1 - py0, 1e-6)
-                    scale_p = min((sub_w - 6) / pw, avail_h / ph)
-                    p_dx = shape_x + 3 + (sub_w - pw * scale_p) / 2
+                    scale_p = min((profile_w - 6) / pw, avail_h * 0.55 / ph)
+                    p_dx = shape_x + 3 + (profile_w - pw * scale_p) / 2
                     p_dy = cy - ph * scale_p / 2
 
-                    canvas.setLineWidth(1.0)
+                    canvas.setLineWidth(0.5)
+                    canvas.setLineJoin(1)
+                    canvas.setLineCap(1)
                     canvas.setStrokeColorRGB(0, 0, 0)
                     for curve in profile_paths:
                         if len(curve) < 2:
@@ -881,42 +680,32 @@ def export_pdf(parts, destination, name='', date='', day='', header=None):
                         canvas.drawPath(d, stroke=1, fill=0)
 
                     # Subtle vertical separator between 2D profile and 3D isometric view
-                    div_x = shape_x + sub_w + 4
+                    div_x = shape_x + profile_w + 4
                     canvas.setLineWidth(0.3)
                     canvas.setStrokeColorRGB(0.85, 0.85, 0.85)
                     canvas.line(div_x, ytop - 6, div_x, ytop - row_h + 6)
 
-                    # 2. Isometric View (Right) - 3D shaded perspective ("کنار شکل")
+                    # Shaded isometric view with exact visible edges (right).
                     ix0, iy0, ix1, iy1 = part.bounds
                     iw, ih = max(ix1 - ix0, 1e-6), max(iy1 - iy0, 1e-6)
-                    scale_i = min((sub_w - 6) / iw, avail_h / ih)
-                    i_dx = div_x + 4 + (sub_w - iw * scale_i) / 2
+                    scale_i = min((iso_w - 6) / iw, avail_h / ih)
+                    i_dx = div_x + 4 + (iso_w - iw * scale_i) / 2
                     i_dy = cy - ih * scale_i / 2
 
                     if faces:
-                        for f in faces:
-                            poly = [(i_dx + (p[0] - ix0) * scale_i, i_dy + (p[1] - iy0) * scale_i) for p in f['points']]
-                            if len(poly) >= 3:
-                                canvas.setFillColorRGB(*f['rgb'])
-                                canvas.setStrokeColorRGB(0.18, 0.18, 0.22)
-                                canvas.setLineWidth(0.35)
-                                p_obj = canvas.beginPath()
-                                p_obj.moveTo(poly[0][0], poly[0][1])
-                                for pt in poly[1:]:
-                                    p_obj.lineTo(pt[0], pt[1])
-                                p_obj.close()
-                                canvas.drawPath(p_obj, fill=1, stroke=1)
-                    else:
-                        canvas.setLineWidth(0.4)
-                        canvas.setStrokeColorRGB(0, 0, 0)
-                        for outline in part.paths:
-                            if len(outline) < 2:
-                                continue
-                            drawing = canvas.beginPath()
-                            drawing.moveTo(i_dx + (outline[0][0] - ix0) * scale_i, i_dy + (outline[0][1] - iy0) * scale_i)
-                            for x, y in outline[1:]:
-                                drawing.lineTo(i_dx + (x - ix0) * scale_i, i_dy + (y - iy0) * scale_i)
-                            canvas.drawPath(drawing)
+                        image = _shade_step(faces, part.bounds)
+                        canvas.drawImage(ImageReader(image), i_dx, i_dy,
+                                         width=iw * scale_i, height=ih * scale_i)
+                    canvas.setLineWidth(0.4)
+                    canvas.setStrokeColorRGB(0, 0, 0)
+                    for outline in part.paths:
+                        if len(outline) < 2:
+                            continue
+                        drawing = canvas.beginPath()
+                        drawing.moveTo(i_dx + (outline[0][0] - ix0) * scale_i, i_dy + (outline[0][1] - iy0) * scale_i)
+                        for x, y in outline[1:]:
+                            drawing.lineTo(i_dx + (x - ix0) * scale_i, i_dy + (y - iy0) * scale_i)
+                        canvas.drawPath(drawing)
                 else:
                     drawing_scale = min((widths[2] - 16) / max(geom_w, 1e-9), (row_h - 16) / max(geom_h, 1e-9))
                     dx = xs[2] + (widths[2] - geom_w * drawing_scale) / 2
@@ -927,8 +716,8 @@ def export_pdf(parts, destination, name='', date='', day='', header=None):
                             poly = [(dx + (p[0] - x0) * drawing_scale, dy + (p[1] - y0) * drawing_scale) for p in f['points']]
                             if len(poly) >= 3:
                                 canvas.setFillColorRGB(*f['rgb'])
-                                canvas.setStrokeColorRGB(0.18, 0.18, 0.22)
-                                canvas.setLineWidth(0.35)
+                                canvas.setStrokeColorRGB(*f['rgb'])
+                                canvas.setLineWidth(0.08)
                                 p_obj = canvas.beginPath()
                                 p_obj.moveTo(poly[0][0], poly[0][1])
                                 for pt in poly[1:]:
@@ -946,6 +735,7 @@ def export_pdf(parts, destination, name='', date='', day='', header=None):
                             for x, y in outline[1:]:
                                 drawing.lineTo(dx + (x - x0) * drawing_scale, dy + (y - y0) * drawing_scale)
                             canvas.drawPath(drawing)
+            canvas.setFillColorRGB(0, 0, 0)
             canvas.setFont('Helvetica', 8)
             canvas.drawRightString(page_w - margin, 22, f'Page {page + 1} / {pages}')
             if any(p.assumed_mm for p in batch):

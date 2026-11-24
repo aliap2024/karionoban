@@ -1,12 +1,12 @@
 Unicode True
 !include "LogicLib.nsh"
 Name "لیزر مرکزی"
-Caption "نصب و به‌روزرسانی لیزر مرکزی 1.0.4"
-OutFile "LaserMarkazi-Setup-1.0.4.exe"
-VIProductVersion "1.0.4.0"
+Caption "نصب و به‌روزرسانی لیزر مرکزی 1.0.6"
+OutFile "LaserMarkazi-Setup-1.0.6.exe"
+VIProductVersion "1.0.6.0"
 VIAddVersionKey "ProductName" "لیزر مرکزی"
-VIAddVersionKey "FileDescription" "نصاب و به‌روزرسان لیزر مرکزی 1.0.4"
-VIAddVersionKey "FileVersion" "1.0.4"
+VIAddVersionKey "FileDescription" "نصاب و به‌روزرسان لیزر مرکزی 1.0.6"
+VIAddVersionKey "FileVersion" "1.0.6"
 RequestExecutionLevel user
 SetCompress off
 ShowInstDetails show
