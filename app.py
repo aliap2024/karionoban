@@ -66,8 +66,11 @@ class Part:
     profile_bounds: tuple = None
     size_3d: tuple = None
     layers: list = None
+    open_paths: list = None
 
     def __post_init__(self):
+        if self.open_paths is None:
+            self.open_paths = []
         if self.checked and not self.delivery_checked:
             self.delivery_checked = True
         elif self.delivery_checked and not self.checked:
@@ -223,8 +226,18 @@ def _same_shape(paths, other, tolerance):
         starts = np.concatenate([np.asarray(p[:-1]) - origin for p in outlines])
         ends = np.concatenate([np.asarray(p[1:]) - origin for p in outlines])
         return starts, ends
+    def sample_points(outlines, origin):
+        pts = []
+        for p in outlines:
+            pts.append(np.asarray(p) - origin)
+            if len(p) > 1:
+                pts.append((np.asarray(p[:-1]) + np.asarray(p[1:])) / 2 - origin)
+        return np.concatenate(pts, axis=0)
+
     aa, az = segments(paths, ca)
     ba, bz = segments(other, cb)
+    pts_a = sample_points(paths, ca)
+    pts_b = sample_points(other, cb)
     def near(points, starts, ends):
         delta = ends - starts
         length2 = (delta * delta).sum(axis=1)
@@ -240,8 +253,7 @@ def _same_shape(paths, other, tolerance):
             angle = math.atan2(target[1], target[0]) - math.atan2(anchor[1], anchor[0])
             c, sn = math.cos(angle), math.sin(angle)
             rotation = np.array([[c, sn], [-sn, c]])
-            ra, rz = aa @ rotation, az @ rotation
-            if near(ra, ba, bz) and near(ba, ra, rz):
+            if near(pts_a @ rotation, ba, bz) and near(pts_b, aa @ rotation, az @ rotation):
                 return True
     return False
 
@@ -557,6 +569,7 @@ def load_parts(filename, input_mm=False):
             else:
                 is_part[i] = True
     # shortcut: enclosed open strokes are treated as bends, not open cuts/engraving.
+    part_open_paths = {i: [] for i in range(n)}
     for path in open_paths:
         mid = ((path[0][0] + path[1][0]) / 2, (path[0][1] + path[1][1]) / 2)
         owners = [i for i, outline in enumerate(closed) if is_part[i]
@@ -565,6 +578,8 @@ def load_parts(filename, input_mm=False):
                   and _inside(mid, outline)]
         if not owners and not sheets:
             raise ValueError('Open cut outline outside any part: close disconnected LINE/ARC endpoints')
+        if owners:
+            part_open_paths[owners[0]].append(path)
     parts = []
     for i, path in enumerate(closed):
         if not is_part[i]:
@@ -591,7 +606,8 @@ def load_parts(filename, input_mm=False):
                 break
         else:
             parts.append(Part(drawing.source, paths, _bounds(paths), drawing.quantity,
-                              assumed_mm=drawing.assumed_mm, thickness=drawing.thickness))
+                              assumed_mm=drawing.assumed_mm, thickness=drawing.thickness,
+                              open_paths=part_open_paths.get(i, [])))
     if not parts:
         raise ValueError('No closed parts found')
     if len(parts) > 1:
@@ -822,6 +838,174 @@ def export_pdf(parts, destination, name='', date='', day='', header=None):
             os.unlink(temporary)
 
 
+@dataclass
+class CompareItem:
+    status: str          # 'MATCH', 'QUANTITY_MISMATCH', 'MISSING_IN_NEST', 'EXTRA_IN_NEST'
+    name: str
+    size: tuple
+    required_qty: int
+    nested_qty: int
+    diff: int
+    thickness: str = ''
+    part_obj: Any = None
+    nested_obj: Any = None
+    note: str = ''
+
+
+@dataclass
+class CompareResult:
+    items: list
+    is_match: bool
+    total_required: int
+    total_nested: int
+    matched_count: int
+    mismatched_count: int
+    missing_count: int
+    extra_count: int
+    include_open_lines: bool
+
+
+def compare_nesting(nested_sources, part_sources, include_open_lines=False, tolerance=0.1, input_mm=True):
+    """
+    Compare parts nested on sheet(s) against expected individual parts.
+    
+    nested_sources: list of file paths (str/Path) or Part objects representing nested layout(s).
+    part_sources: list of file paths (str/Path) or Part objects representing expected individual parts.
+    include_open_lines: if True, bend lines / engraving lines are checked during shape comparison.
+    """
+    def resolve_parts(sources):
+        if isinstance(sources, (str, Path, Part)):
+            sources = [sources]
+        res = []
+        for s in sources:
+            if isinstance(s, Part):
+                res.append(s)
+            else:
+                res.extend(load_parts(s, input_mm=input_mm))
+        return res
+
+    nested_raw = resolve_parts(nested_sources)
+    expected_raw = resolve_parts(part_sources)
+
+    def _get_geometry(part):
+        if include_open_lines and getattr(part, 'open_paths', None):
+            return part.paths + part.open_paths
+        return part.paths
+
+    # Consolidate identical parts in nested layouts
+    nested_unique = []
+    for p in nested_raw:
+        geo = _get_geometry(p)
+        for u in nested_unique:
+            if _same_shape(geo, _get_geometry(u), tolerance):
+                u.quantity += p.quantity
+                break
+        else:
+            p_copy = Part(p.source, p.paths, p.bounds, p.quantity,
+                          thickness=p.thickness, label=p.label,
+                          open_paths=getattr(p, 'open_paths', None) or [])
+            nested_unique.append(p_copy)
+
+    # Consolidate identical parts in expected parts
+    expected_unique = []
+    for p in expected_raw:
+        geo = _get_geometry(p)
+        for u in expected_unique:
+            if _same_shape(geo, _get_geometry(u), tolerance):
+                u.quantity += p.quantity
+                break
+        else:
+            p_copy = Part(p.source, p.paths, p.bounds, p.quantity,
+                          thickness=p.thickness, label=p.label,
+                          open_paths=getattr(p, 'open_paths', None) or [])
+            expected_unique.append(p_copy)
+
+    matched_nested_indices = set()
+    items = []
+
+    for exp in expected_unique:
+        exp_geo = _get_geometry(exp)
+        match_idx = None
+        for idx, nes in enumerate(nested_unique):
+            if idx not in matched_nested_indices:
+                if _same_shape(exp_geo, _get_geometry(nes), tolerance):
+                    match_idx = idx
+                    break
+        if match_idx is not None:
+            matched_nested_indices.add(match_idx)
+            nes = nested_unique[match_idx]
+            diff = nes.quantity - exp.quantity
+            if diff == 0:
+                status = 'MATCH'
+                note = 'تطابق کامل (Exact Match)'
+            elif diff < 0:
+                status = 'QUANTITY_MISMATCH'
+                note = f'کسری تعداد: {abs(diff)} عدد کمتر چیده شده'
+            else:
+                status = 'QUANTITY_MISMATCH'
+                note = f'مازاد تعداد: {diff} عدد اضافه چیده شده'
+            items.append(CompareItem(
+                status=status,
+                name=exp.label or exp.source.name,
+                size=exp.size,
+                required_qty=exp.quantity,
+                nested_qty=nes.quantity,
+                diff=diff,
+                thickness=exp.thickness or nes.thickness,
+                part_obj=exp,
+                nested_obj=nes,
+                note=note
+            ))
+        else:
+            items.append(CompareItem(
+                status='MISSING_IN_NEST',
+                name=exp.label or exp.source.name,
+                size=exp.size,
+                required_qty=exp.quantity,
+                nested_qty=0,
+                diff=-exp.quantity,
+                thickness=exp.thickness,
+                part_obj=exp,
+                nested_obj=None,
+                note='قطعه در فایل چیدمان چیده نشده است'
+            ))
+
+    for idx, nes in enumerate(nested_unique):
+        if idx not in matched_nested_indices:
+            items.append(CompareItem(
+                status='EXTRA_IN_NEST',
+                name=nes.label or nes.source.name,
+                size=nes.size,
+                required_qty=0,
+                nested_qty=nes.quantity,
+                diff=nes.quantity,
+                thickness=nes.thickness,
+                part_obj=None,
+                nested_obj=nes,
+                note='قطعه اضافه / ناشناخته در فایل چیدمان'
+            ))
+
+    is_match = all(it.status == 'MATCH' for it in items)
+    matched_count = sum(1 for it in items if it.status == 'MATCH')
+    mismatched_count = sum(1 for it in items if it.status == 'QUANTITY_MISMATCH')
+    missing_count = sum(1 for it in items if it.status == 'MISSING_IN_NEST')
+    extra_count = sum(1 for it in items if it.status == 'EXTRA_IN_NEST')
+    total_required = sum(it.required_qty for it in items if it.status != 'EXTRA_IN_NEST')
+    total_nested = sum(it.nested_qty for it in items if it.status != 'MISSING_IN_NEST')
+
+    return CompareResult(
+        items=items,
+        is_match=is_match,
+        total_required=total_required,
+        total_nested=total_nested,
+        matched_count=matched_count,
+        mismatched_count=mismatched_count,
+        missing_count=missing_count,
+        extra_count=extra_count,
+        include_open_lines=include_open_lines
+    )
+
+
 def desktop():
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
@@ -1012,7 +1196,147 @@ def desktop():
             except Exception as exc:
                 messagebox.showerror('Export failed', str(exc))
 
+    def open_compare():
+        dialog = tk.Toplevel(root)
+        dialog.title('مقایسه چیدمان با قطعات (Compare Nesting vs Parts)')
+        dialog.geometry('980x660')
+        dialog.minsize(800, 500)
+        dialog.transient(root)
+
+        nested_files = []
+        part_sources = []
+
+        files_frame = ttk.Frame(dialog, padding=(10, 8))
+        files_frame.pack(fill='x')
+
+        nested_frame = ttk.LabelFrame(files_frame, text='۱. فایل‌های چیدمان (Nested Layout DXF)', padding=8)
+        nested_frame.pack(side='left', fill='both', expand=True, padx=(0, 5))
+        nested_listbox = tk.Listbox(nested_frame, height=5, selectmode='extended')
+        nested_listbox.pack(fill='both', expand=True, pady=(0, 5))
+
+        btn_box1 = ttk.Frame(nested_frame)
+        btn_box1.pack(fill='x')
+        def add_nested_files():
+            chosen = filedialog.askopenfilenames(parent=dialog, filetypes=[('CAD drawings', '*.dxf *.DXF'), ('All files', '*.*')])
+            for f in chosen:
+                if f not in nested_files:
+                    nested_files.append(f)
+                    nested_listbox.insert('end', Path(f).name)
+        def remove_nested_file():
+            for idx in sorted(nested_listbox.curselection(), reverse=True):
+                del nested_files[idx]
+                nested_listbox.delete(idx)
+        ttk.Button(btn_box1, text='افزودن چیدمان...', command=add_nested_files).pack(side='left', padx=2)
+        ttk.Button(btn_box1, text='حذف', command=remove_nested_file).pack(side='left', padx=2)
+
+        parts_frame = ttk.LabelFrame(files_frame, text='۲. فایل‌های قطعات مجزا (Individual Part DXF)', padding=8)
+        parts_frame.pack(side='right', fill='both', expand=True, padx=(5, 0))
+        part_listbox = tk.Listbox(parts_frame, height=5, selectmode='extended')
+        part_listbox.pack(fill='both', expand=True, pady=(0, 5))
+
+        btn_box2 = ttk.Frame(parts_frame)
+        btn_box2.pack(fill='x')
+        def add_part_files():
+            chosen = filedialog.askopenfilenames(parent=dialog, filetypes=[('CAD drawings', '*.dxf *.DXF'), ('All files', '*.*')])
+            for f in chosen:
+                if f not in part_sources:
+                    part_sources.append(f)
+                    part_listbox.insert('end', Path(f).name)
+        def use_current_table():
+            if not parts:
+                messagebox.showinfo('No parts', 'جدول اصلی خالی است. ابتدا فایل‌های قطعات را اضافه کنید.', parent=dialog)
+                return
+            for p in parts:
+                if p not in part_sources:
+                    part_sources.append(p)
+                    part_listbox.insert('end', f'{p.label or p.source.name} (Qty: {p.quantity})')
+        def remove_part_file():
+            for idx in sorted(part_listbox.curselection(), reverse=True):
+                del part_sources[idx]
+                part_listbox.delete(idx)
+        ttk.Button(btn_box2, text='افزودن قطعات...', command=add_part_files).pack(side='left', padx=2)
+        ttk.Button(btn_box2, text='استفاده از جدول اصلی', command=use_current_table).pack(side='left', padx=2)
+        ttk.Button(btn_box2, text='حذف', command=remove_part_file).pack(side='left', padx=2)
+
+        ctrl_frame = ttk.Frame(dialog, padding=(10, 6))
+        ctrl_frame.pack(fill='x')
+        chk_open = tk.BooleanVar(value=False)
+        ttk.Checkbutton(ctrl_frame, text='بررسی خطوط باز و خطوط خم/هک در مقایسه (Include bend & engraving open lines)', variable=chk_open).pack(side='left', padx=5)
+
+        summary_var = tk.StringVar(value='فایل‌های چیدمان و قطعات مجزا را انتخاب کنید و دکمه مقایسه را بزنید.')
+        summary_lbl = ttk.Label(dialog, textvariable=summary_var, font=('Helvetica', 10, 'bold'), padding=(10, 5))
+        summary_lbl.pack(anchor='w')
+
+        cols = ('status', 'name', 'size', 'required', 'nested', 'diff', 'note')
+        res_tree = ttk.Treeview(dialog, columns=cols, show='headings', selectmode='extended')
+        res_tree.heading('status', text='وضعیت (Status)')
+        res_tree.heading('name', text='نام قطعه (Part Name)')
+        res_tree.heading('size', text='ابعاد (Size mm)')
+        res_tree.heading('required', text='نیاز (Req)')
+        res_tree.heading('nested', text='چیدمان (Nested)')
+        res_tree.heading('diff', text='اختلاف (Diff)')
+        res_tree.heading('note', text='توضیحات (Description)')
+
+        res_tree.column('status', width=130, anchor='center')
+        res_tree.column('name', width=200, anchor='w')
+        res_tree.column('size', width=110, anchor='center')
+        res_tree.column('required', width=70, anchor='center')
+        res_tree.column('nested', width=70, anchor='center')
+        res_tree.column('diff', width=65, anchor='center')
+        res_tree.column('note', width=260, anchor='w')
+        res_tree.pack(fill='both', expand=True, padx=10, pady=5)
+
+        res_tree.tag_configure('tag_match', foreground='#1b5e20')
+        res_tree.tag_configure('tag_mismatch', foreground='#e65100')
+        res_tree.tag_configure('tag_missing', foreground='#b71c1c')
+        res_tree.tag_configure('tag_extra', foreground='#4a148c')
+
+        def do_compare():
+            if not nested_files:
+                messagebox.showwarning('Missing input', 'لطفاً حداقل یک فایل چیدمان اضافه کنید.', parent=dialog)
+                return
+            if not part_sources:
+                messagebox.showwarning('Missing input', 'لطفاً حداقل یک فایل قطعه اضافه کنید.', parent=dialog)
+                return
+            try:
+                result = compare_nesting(nested_files, part_sources,
+                                         include_open_lines=chk_open.get(),
+                                         input_mm=input_mm.get())
+            except Exception as exc:
+                messagebox.showerror('Comparison error', str(exc), parent=dialog)
+                return
+
+            res_tree.delete(*res_tree.get_children())
+            for item in result.items:
+                w, h = item.size
+                size_str = f'{w:.1f} x {h:.1f}' if w and h else '-'
+                diff_str = f'+{item.diff}' if item.diff > 0 else str(item.diff)
+                if item.status == 'MATCH':
+                    icon = '✔ تطابق کامل'
+                    tag = 'tag_match'
+                elif item.status == 'QUANTITY_MISMATCH':
+                    icon = '⚠ مغایرت تعداد'
+                    tag = 'tag_mismatch'
+                elif item.status == 'MISSING_IN_NEST':
+                    icon = '✖ چیده نشده (کسری)'
+                    tag = 'tag_missing'
+                else:
+                    icon = '❓ قطعه اضافه'
+                    tag = 'tag_extra'
+
+                res_tree.insert('', 'end', values=(
+                    icon, item.name, size_str, item.required_qty, item.nested_qty, diff_str, item.note
+                ), tags=(tag,))
+
+            if result.is_match:
+                summary_var.set(f'✔ تطابق کامل: تمام {result.total_required} قطعه دقیقاً طبق سفارش چیده شده‌اند.')
+            else:
+                summary_var.set(f'⚠ مغایرت: {result.matched_count} منطبق | {result.mismatched_count} مغایرت تعداد | {result.missing_count} کسری | {result.extra_count} قطعه اضافه')
+
+        ttk.Button(ctrl_frame, text='▶ شروع مقایسه (Compare)', command=do_compare).pack(side='right', padx=5)
+
     ttk.Button(toolbar, text='Add CAD files', command=add).pack(side='left', padx=4)
+    ttk.Button(toolbar, text='Compare (مقایسه)', command=open_compare).pack(side='left', padx=4)
     ttk.Checkbutton(toolbar, text='Input coordinates are mm', variable=input_mm).pack(side='left', padx=8)
     ttk.Button(toolbar, text='Remove selected', command=remove).pack(side='left', padx=4)
     ttk.Button(toolbar, text='Clear all', command=clear).pack(side='left', padx=4)
@@ -1033,8 +1357,23 @@ if __name__ == '__main__':
     parser.add_argument('--name', default='', help='Order / Customer name')
     parser.add_argument('--date', default='', help='Date for report header')
     parser.add_argument('--day', default='', help='Day for report header')
+    parser.add_argument('--compare-nested', nargs='+', help='Nested sheet DXF files to compare')
+    parser.add_argument('--compare-parts', nargs='+', help='Individual part DXF files to compare against')
+    parser.add_argument('--include-open-lines', action='store_true', default=False,
+                        help='Include open bend/engraving lines in nesting comparison')
     args = parser.parse_args()
-    if args.files:
+    if args.compare_nested and args.compare_parts:
+        res = compare_nesting(args.compare_nested, args.compare_parts,
+                              include_open_lines=args.include_open_lines,
+                              input_mm=args.input_mm)
+        print(f"Comparison Result: {'MATCH' if res.is_match else 'MISMATCH'}")
+        print(f"Total Required: {res.total_required} | Total Nested: {res.total_nested}")
+        print(f"Matched: {res.matched_count} | Mismatched Qty: {res.mismatched_count} | Missing: {res.missing_count} | Extra: {res.extra_count}")
+        print("-" * 75)
+        for it in res.items:
+            w, h = it.size
+            print(f"[{it.status:<17}] {it.name:<25} {w:.1f}x{h:.1f}mm  Req:{it.required_qty:<3} Nest:{it.nested_qty:<3} Diff:{it.diff:<+3} {it.note}")
+    elif args.files:
         export_pdf(
             [part for path in args.files for part in load_parts(path, input_mm=args.input_mm)], args.output,
             name=args.name, date=args.date, day=args.day
