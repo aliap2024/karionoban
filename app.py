@@ -68,6 +68,7 @@ class Part:
     size_3d: tuple = None
     layers: list = None
     open_paths: list = None
+    engravings: list = None
 
     def __post_init__(self):
         if self.open_paths is None:
@@ -104,6 +105,7 @@ def _read_part(filename, input_mm=False):
     scale = units.conversion_factor(doc.units, units.MM) if doc.units and not input_mm else 1
     paths = []
     path_layers = []
+    path_engravings = []
     skipped = set()
     # Text and dimensions annotate a part; they are not its cut geometry.
     annotations = {'TEXT', 'MTEXT', 'DIMENSION', 'LEADER', 'MLEADER', 'POINT', 'VIEWPORT'}
@@ -122,11 +124,15 @@ def _read_part(filename, input_mm=False):
                 linetype = doc.layers.get(styled_entity.dxf.layer).dxf.get('linetype', 'CONTINUOUS').upper()
             else:
                 linetype = 'CONTINUOUS'
+        color = styled_entity.dxf.get('color', None)
+        layer_name = styled_entity.dxf.layer.lower() if styled_entity.dxf.layer else ''
+        engraving = (color == 1) or bool(re.search(r'(?i)(?:hak|heck|engrav|mark|etch|حک|هک)', layer_name))
         if linetype not in ('CONTINUOUS', 'BYBLOCK'):
             if linetype in doc.linetypes:
                 pattern = doc.linetypes.get(linetype).pattern_tags.tags
                 if any(tag.code == 49 and tag.value <= 0 for tag in pattern):
-                    continue
+                    if not engraving:
+                        continue
         try:
             path = make_path(entity)
         except (TypeError, ValueError, NotImplementedError):
@@ -135,6 +141,7 @@ def _read_part(filename, input_mm=False):
         if len(path):
             paths.append(path)
             path_layers.append(styled_entity.dxf.layer)
+            path_engravings.append(engraving)
     if skipped:
         raise ValueError('Unsupported geometry: ' + ', '.join(sorted(skipped)))
     if not paths:
@@ -160,7 +167,7 @@ def _read_part(filename, input_mm=False):
     match_th = re.search(r'(?:(?:^|[-_])(\d+(?:\.\d+)?)\s*mm(?=$|[^a-z0-9]))|(?:(?:ahan|iron|steel|alum|sheet)[-\s_]+(\d+(?:\.\d+)?))', source.stem, re.I)
     thickness = f'{match_th.group(1) or match_th.group(2)}mm' if match_th else ''
     return Part(source, outlines, bounds, quantity, assumed_mm=not bool(doc.units) and not input_mm,
-                thickness=thickness, layers=path_layers)
+                thickness=thickness, layers=path_layers, engravings=path_engravings)
 
 
 
@@ -466,11 +473,16 @@ def load_parts(filename, input_mm=False):
         return _load_step(source)
     drawing = _read_part(filename, input_mm=input_mm)
     drawing_layers = getattr(drawing, 'layers', None) or ['0'] * len(drawing.paths)
+    drawing_engravings = getattr(drawing, 'engravings', None) or [False] * len(drawing.paths)
     tolerance = .1  # millimeters, including files whose source units are inches
     closed, pending, open_paths = [], [], []
     closed_layers, pending_layers = [], []
-    for path, layer in zip(drawing.paths, drawing_layers):
-        if math.dist(path[0], path[-1]) <= tolerance:
+    open_is_engraving = []
+    for path, layer, is_eng in zip(drawing.paths, drawing_layers, drawing_engravings):
+        if is_eng:
+            open_paths.append(path)
+            open_is_engraving.append(True)
+        elif math.dist(path[0], path[-1]) <= tolerance:
             closed.append(path[:-1] + [path[0]])
             closed_layers.append(layer)
         else:
@@ -494,6 +506,7 @@ def load_parts(filename, input_mm=False):
                     break
             else:
                 open_paths.append(chain)
+                open_is_engraving.append(False)
                 break
         else:
             chain[-1] = chain[0]
@@ -571,13 +584,13 @@ def load_parts(filename, input_mm=False):
                 is_part[i] = True
     # shortcut: enclosed open strokes are treated as bends, not open cuts/engraving.
     part_open_paths = {i: [] for i in range(n)}
-    for path in open_paths:
-        mid = ((path[0][0] + path[1][0]) / 2, (path[0][1] + path[1][1]) / 2)
+    for path, is_eng in zip(open_paths, open_is_engraving):
+        mid = ((path[0][0] + path[len(path)//2][0]) / 2, (path[0][1] + path[len(path)//2][1]) / 2)
         owners = [i for i, outline in enumerate(closed) if is_part[i]
-                  and boxes[i][0] <= mid[0] <= boxes[i][2]
-                  and boxes[i][1] <= mid[1] <= boxes[i][3]
+                  and boxes[i][0] - 1.0 <= mid[0] <= boxes[i][2] + 1.0
+                  and boxes[i][1] - 1.0 <= mid[1] <= boxes[i][3] + 1.0
                   and _inside(mid, outline)]
-        if not owners and not sheets:
+        if not owners and not sheets and not is_eng:
             raise ValueError('Open cut outline outside any part: close disconnected LINE/ARC endpoints')
         if owners:
             part_open_paths[owners[0]].append(path)
@@ -609,6 +622,11 @@ def load_parts(filename, input_mm=False):
             parts.append(Part(drawing.source, paths, _bounds(paths), drawing.quantity,
                               assumed_mm=drawing.assumed_mm, thickness=drawing.thickness,
                               open_paths=part_open_paths.get(i, [])))
+    if not sheets and len(parts) > 1:
+        max_area = max(_area(p.paths[0]) for p in parts)
+        if max_area >= 50_000:
+            # Filter out tiny stray note boxes / annotation frames outside the main part
+            parts = [p for p in parts if _area(p.paths[0]) >= max(2000.0, 0.05 * max_area) or len(p.paths) > 1 or getattr(p, 'open_paths', None)]
     if not parts:
         raise ValueError('No closed parts found')
     if len(parts) > 1:

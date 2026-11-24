@@ -1007,6 +1007,54 @@ class ReportTests(unittest.TestCase):
             self.assertTrue(res_enc.is_match)
             self.assertEqual(res_enc.matched_count, 1)
 
+    def test_raw_part_with_external_text_and_red_engraving_points_matches_nesting(self):
+        with tempfile.TemporaryDirectory() as folder:
+            f = Path(folder)
+            raw_file = f / 'panel_raw-q2.dxf'
+            dwg = ezdxf.new()
+            dwg.units = ezdxf.units.MM
+            sp = dwg.modelspace()
+            # 1. Main outer boundary (300 x 200)
+            sp.add_lwpolyline([(0, 0), (300, 0), (300, 200), (0, 200)], close=True)
+            # 2. Cut through-hole (white / color 7)
+            sp.add_circle((150, 100), 20, dxfattribs={'color': 7})
+            # 3. Engraving marking circles and crosshairs (red / color 1) drawn with HIDDEN linetype
+            dwg.linetypes.new('HIDDEN', dxfattribs={'pattern': [5, 3, -2]})
+            sp.add_circle((50, 50), 5, dxfattribs={'color': 1, 'linetype': 'HIDDEN'})
+            sp.add_line((45, 50), (55, 50), dxfattribs={'color': 1, 'linetype': 'HIDDEN'})
+            # 4. External text / notes outside the part
+            sp.add_mtext('نقاط قرمز خطوط حک میباشند', dxfattribs={'insert': (-100, 300), 'color': 1})
+            dwg.saveas(raw_file)
+
+            # Nested sheet layout: operator placed part on sheet, CAM made red entities continuous color 1
+            nest_file = f / 'nest_sheet.dxf'
+            dwg_nest = ezdxf.new()
+            dwg_nest.units = ezdxf.units.MM
+            sp_nest = dwg_nest.modelspace()
+            sp_nest.add_lwpolyline([(0, 0), (1000, 0), (1000, 1000), (0, 1000)], close=True, dxfattribs={'layer': 'SHEET_1'})
+            # 2 nested instances
+            for i in range(2):
+                ox, oy = 50 + i * 350, 50
+                sp_nest.add_lwpolyline([(ox, oy), (ox + 300, oy), (ox + 300, oy + 200), (ox, oy + 200)], close=True)
+                sp_nest.add_circle((ox + 150, oy + 100), 20, dxfattribs={'color': 7})
+                sp_nest.add_circle((ox + 50, oy + 50), 5, dxfattribs={'color': 1})
+                sp_nest.add_line((ox + 45, oy + 50), (ox + 55, oy + 50), dxfattribs={'color': 1})
+            dwg_nest.saveas(nest_file)
+
+            # 1. Comparison without open lines (only cut boundaries & cut holes):
+            res1 = compare_nesting([nest_file], [raw_file], include_open_lines=False)
+            self.assertTrue(res1.is_match)
+            self.assertEqual(res1.total_required, 2)
+            self.assertEqual(res1.total_nested, 2)
+            self.assertEqual(res1.matched_count, 1)
+
+            # 2. Comparison with open lines (bends & engraving):
+            res2 = compare_nesting([nest_file], [raw_file], include_open_lines=True)
+            self.assertTrue(res2.is_match)
+            self.assertEqual(res2.total_required, 2)
+            self.assertEqual(res2.total_nested, 2)
+            self.assertEqual(res2.matched_count, 1)
+
 
 if __name__ == '__main__':
     unittest.main()
